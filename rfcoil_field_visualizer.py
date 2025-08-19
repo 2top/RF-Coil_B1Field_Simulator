@@ -1,3 +1,5 @@
+
+
 """
 PyQt5 version of the RF Coil Random Search Optimizer with Field Visualization
 """
@@ -1144,53 +1146,120 @@ class MagneticFieldVisualizer(QWidget):
 # ---------------------------
 
 class MeshProcessorTab(QWidget):
-    """Placeholder for STL mesh processing functionality"""
+    """Mesh processing tab with STL/STEP import, meshing, and visualization."""
     def __init__(self, parent=None):
         super().__init__(parent)
+        import helpers
+        import pyvista as pv
+        from pyvistaqt import QtInteractor
+        self.helpers = helpers
+        self.pv = pv
         self.initUI()
-        
+
     def initUI(self):
         layout = QVBoxLayout()
-        
         title = QLabel("Mesh Processor")
         title.setStyleSheet("font-weight: bold; font-size: 16px;")
         layout.addWidget(title)
-        
-        # Placeholder for mesh processing UI
-        layout.addWidget(QLabel("This tab will be implemented separately"))
-        layout.addWidget(QLabel("Functionality: Import/process STL mesh files"))
-        
-        # Import button
-        import_btn = QPushButton("Import STL File")
-        import_btn.clicked.connect(self.import_stl)
-        layout.addWidget(import_btn)
-        
+
+        # File selection
+        self.file_label = QLabel("No file loaded")
+        self.file_label.setStyleSheet("color: green;")
+        layout.addWidget(self.file_label)
+
+        file_btn = QPushButton("Import STL/STEP File")
+        file_btn.clicked.connect(self.import_file)
+        layout.addWidget(file_btn)
+
+        # Mesh params
+        self.element_size_input = QLineEdit("0.15")
+        self.element_size_input.setPlaceholderText("Element Size (e.g. 0.15)")
+        layout.addWidget(QLabel("Element Size:"))
+        layout.addWidget(self.element_size_input)
+
+        self.size_factor_input = QLineEdit("2.0")
+        self.size_factor_input.setPlaceholderText("Max Element Size Factor (e.g. 2.0)")
+        layout.addWidget(QLabel("Max Element Size Factor:"))
+        layout.addWidget(self.size_factor_input)
+
+        self.sizing_mode_combo = QComboBox()
+        self.sizing_mode_combo.addItems(["uniform", "curvature"])
+        layout.addWidget(QLabel("Sizing Mode:"))
+        layout.addWidget(self.sizing_mode_combo)
+
+        mesh_btn = QPushButton("Process Mesh")
+        mesh_btn.clicked.connect(self.process_mesh)
+        layout.addWidget(mesh_btn)
+
+        # PyVista plotter
+        self.plotter = QtInteractor(self)
+        layout.addWidget(self.plotter.interactor, stretch=1)
+
         # Export button
         export_btn = QPushButton("Export to Visualizer")
         export_btn.clicked.connect(self.export_to_visualizer)
         layout.addWidget(export_btn)
-        
+
         self.setLayout(layout)
-    
-    def import_stl(self):
-        """Placeholder for STL import functionality"""
+
+        # State
+        self.input_file = None
+        self.mesh_poly = None
+
+    def import_file(self):
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Open STL File", "", "STL Files (*.stl)"
+            self, "Open File", "", "Mesh/CAD Files (*.stl *.step *.stp)"
         )
         if file_name:
-            QMessageBox.information(
-                self, "File Imported", 
-                f"STL file imported successfully:\n{file_name}\n\n"
-                "Processing functionality will be implemented separately."
+            self.input_file = file_name
+            self.file_label.setText(f"Loaded: {os.path.basename(file_name)}")
+            self.plotter.clear()
+            self.mesh_poly = None
+
+    def process_mesh(self):
+        if not self.input_file:
+            QMessageBox.warning(self, "No File", "Please import an STL or STEP file first.")
+            return
+        try:
+            element_size = float(self.element_size_input.text())
+            size_factor = float(self.size_factor_input.text())
+            sizing_mode = self.sizing_mode_combo.currentText()
+            mesh_filename = "generated_mesh.msh"
+            poly = self.helpers.load_surface_mesh(
+                self.input_file, mesh_filename, element_size, size_factor, sizing_mode
             )
-    
+            self.mesh_poly = poly
+            self.plotter.clear()
+            self.plotter.add_mesh(poly, color="lightblue", opacity=0.7, label="Surface Mesh")
+            self.plotter.reset_camera()
+        except Exception as e:
+            QMessageBox.critical(self, "Mesh Error", f"Mesh processing failed:\n{e}")
+
     def export_to_visualizer(self):
-        """Placeholder for export functionality"""
-        QMessageBox.information(
-            self, "Export", 
-            "This will export processed mesh to the visualizer tab\n"
-            "when the functionality is implemented."
-        )
+        if self.mesh_poly is None:
+            QMessageBox.warning(self, "No Mesh", "No mesh to export. Please process a mesh first.")
+            return
+        
+        main_window = self.window()
+        field_viz_tab = None
+        if main_window and hasattr(main_window, 'tabs'):
+            # Finding the MagneticFieldVisualizer tab
+            for i in range(main_window.tabs.count()):
+                widget = main_window.tabs.widget(i)
+                if widget.__class__.__name__ == 'MagneticFieldVisualizer':
+                    field_viz_tab = widget
+                    break
+        if field_viz_tab:
+            # Set mesh in the visualizer
+            field_viz_tab.set_coil_data(None, [], self.mesh_poly)
+            # Switch to the visualizer tab
+            for i in range(main_window.tabs.count()):
+                if main_window.tabs.widget(i) is field_viz_tab:
+                    main_window.tabs.setCurrentIndex(i)
+                    break
+            QMessageBox.information(self, "Export", "Mesh exported to Field Visualizer tab.")
+        else:
+            QMessageBox.information(self, "Export", "Mesh exported (but could not find Field Visualizer tab to update).")
 
 
 class OptimizationTab(QWidget):
