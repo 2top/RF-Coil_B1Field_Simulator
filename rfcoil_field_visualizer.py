@@ -1,5 +1,3 @@
-
-
 """
 PyQt5 version of the RF Coil Random Search Optimizer with Field Visualization
 """
@@ -1146,7 +1144,8 @@ class MagneticFieldVisualizer(QWidget):
 # ---------------------------
 
 class MeshProcessorTab(QWidget):
-    """Mesh processing tab with STL/STEP import, meshing, and visualization."""
+
+    """Mesh processing tab with STL/STEP import, meshing, centerline, surface curve extraction, and visualization, matching convert.py logic and UI, with Export to Visualizer."""
     def __init__(self, parent=None):
         super().__init__(parent)
         import helpers
@@ -1154,112 +1153,453 @@ class MeshProcessorTab(QWidget):
         from pyvistaqt import QtInteractor
         self.helpers = helpers
         self.pv = pv
-        self.initUI()
+        self.init_ui()
 
-    def initUI(self):
-        layout = QVBoxLayout()
-        title = QLabel("Mesh Processor")
-        title.setStyleSheet("font-weight: bold; font-size: 16px;")
-        layout.addWidget(title)
+    def init_ui(self):
+        from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QRadioButton, QButtonGroup, QComboBox, QDoubleSpinBox, QSpinBox, QFileDialog, QMessageBox
+        main_layout = QHBoxLayout(self)
+        control_layout = QVBoxLayout()
 
-        # File selection
-        self.file_label = QLabel("No file loaded")
-        self.file_label.setStyleSheet("color: green;")
-        layout.addWidget(self.file_label)
+        # File type radio buttons
+        self.stl_radio = QRadioButton("Accept STL Files")
+        self.stl_radio.setChecked(True)
+        self.stl_radio.toggled.connect(self.set_accept_stl)
+        self.stp_radio = QRadioButton("Accept STP Files")
+        self.stp_radio.toggled.connect(self.set_accept_stp)
+        filetype_group = QButtonGroup()
+        filetype_group.addButton(self.stl_radio)
+        filetype_group.addButton(self.stp_radio)
+        control_layout.addWidget(QLabel("File Type Filter:"))
+        control_layout.addWidget(self.stl_radio)
+        control_layout.addWidget(self.stp_radio)
 
-        file_btn = QPushButton("Import STL/STEP File")
-        file_btn.clicked.connect(self.import_file)
-        layout.addWidget(file_btn)
+        self.btn_load_file = QPushButton("Load File")
+        self.btn_load_file.clicked.connect(self.load_file)
+        self.btn_load_file.setToolTip("Load a .stp or .stl file")
+        control_layout.addWidget(self.btn_load_file)
+        self.loaded_file = QLabel("No file loaded")
+        self.loaded_file.setStyleSheet("color: green;")
+        control_layout.addWidget(self.loaded_file)
 
-        # Mesh params
-        self.element_size_input = QLineEdit("0.15")
-        self.element_size_input.setPlaceholderText("Element Size (e.g. 0.15)")
-        layout.addWidget(QLabel("Element Size:"))
-        layout.addWidget(self.element_size_input)
+        self.btn_process = QPushButton("Generate Centerline")
+        self.btn_process.clicked.connect(self.generate_centerline)
+        self.btn_process.setEnabled(False)
+        self.btn_process.setToolTip("Generate a centerline for loaded coil")
+        control_layout.addWidget(self.btn_process)
 
-        self.size_factor_input = QLineEdit("2.0")
-        self.size_factor_input.setPlaceholderText("Max Element Size Factor (e.g. 2.0)")
-        layout.addWidget(QLabel("Max Element Size Factor:"))
-        layout.addWidget(self.size_factor_input)
+        self.btn_second_process = QPushButton("Generate Surface Curves")
+        self.btn_second_process.clicked.connect(self.generate_surface_curves)
+        self.btn_second_process.setToolTip("Generate surface curves for centerline")
+        control_layout.addWidget(self.btn_second_process)
 
-        self.sizing_mode_combo = QComboBox()
-        self.sizing_mode_combo.addItems(["uniform", "curvature"])
-        layout.addWidget(QLabel("Sizing Mode:"))
-        layout.addWidget(self.sizing_mode_combo)
+        self.btn_clear = QPushButton("Clear Plot")
+        self.btn_clear.clicked.connect(self.clear_plot)
+        self.btn_clear.setToolTip("Clears the current plot")
+        control_layout.addWidget(self.btn_clear)
 
-        mesh_btn = QPushButton("Process Mesh")
-        mesh_btn.clicked.connect(self.process_mesh)
-        layout.addWidget(mesh_btn)
+        self.status_label = QLabel("Status: Ready")
+        self.status_label.setStyleSheet("color: red;")
+        control_layout.addWidget(self.status_label)
 
-        # PyVista plotter
-        self.plotter = QtInteractor(self)
-        layout.addWidget(self.plotter.interactor, stretch=1)
+        # Sizing mode dropdown for STP
+        self.stp_sizing_dropdown = QComboBox()
+        self.stp_sizing_dropdown.addItems(["curvature", "uniform"])
+        self.stp_sizing_dropdown.setCurrentText("uniform")
+        self.stp_sizing_dropdown.currentTextChanged.connect(lambda val: setattr(self, 'sizing_mode', val))
+        self.stp_sizing_dropdown.setToolTip("Choose between Uniform and Curvature Modes for STP Files")
+        self.stp_sizing_dropdown.setEnabled(False)
+        control_layout.addWidget(QLabel("Sizing Mode:"))
+        control_layout.addWidget(self.stp_sizing_dropdown)
 
-        # Export button
-        export_btn = QPushButton("Export to Visualizer")
-        export_btn.clicked.connect(self.export_to_visualizer)
-        layout.addWidget(export_btn)
+        # Element size input
+        self.element_size_input = QDoubleSpinBox()
+        self.element_size_input.setRange(0.01, 10.0)
+        self.element_size_input.setSingleStep(0.01)
+        self.element_size_input.setValue(0.15)
+        self.element_size_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Element Size"))
+        control_layout.addWidget(self.element_size_input)
 
-        self.setLayout(layout)
+        self.max_element_size_factor_input = QDoubleSpinBox()
+        self.max_element_size_factor_input.setRange(1.0, 5.0)
+        self.max_element_size_factor_input.setSingleStep(0.01)
+        self.max_element_size_factor_input.setValue(2.0)
+        self.max_element_size_factor_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Max Element Size Factor"))
+        control_layout.addWidget(self.max_element_size_factor_input)
+
+        self.feature_angle_input = QSpinBox()
+        self.feature_angle_input.setRange(0, 180)
+        self.feature_angle_input.setValue(65)
+        control_layout.addWidget(QLabel("Feature Angle"))
+        control_layout.addWidget(self.feature_angle_input)
+
+        self.trim_points_input = QSpinBox()
+        self.trim_points_input.setRange(0, 1000)
+        self.trim_points_input.setValue(0)
+        self.trim_points_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Trim Points"))
+        control_layout.addWidget(self.trim_points_input)
+
+        self.centerline_s_input = QDoubleSpinBox()
+        self.centerline_s_input.setRange(0.0, 1.0)
+        self.centerline_s_input.setSingleStep(0.001)
+        self.centerline_s_input.setValue(0.01)
+        self.centerline_s_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Centerline Smoothing"))
+        control_layout.addWidget(self.centerline_s_input)
+
+        self.surfacecurves_s_input = QDoubleSpinBox()
+        self.surfacecurves_s_input.setRange(0.0, 1.0)
+        self.surfacecurves_s_input.setSingleStep(0.001)
+        self.surfacecurves_s_input.setValue(0.01)
+        self.surfacecurves_s_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Surface Curves Smoothing"))
+        control_layout.addWidget(self.surfacecurves_s_input)
+
+        self.loop_smoothing_input = QDoubleSpinBox()
+        self.loop_smoothing_input.setRange(0.0, 1.0)
+        self.loop_smoothing_input.setSingleStep(0.001)
+        self.loop_smoothing_input.setValue(0.0)
+        self.loop_smoothing_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Loop Smoothing"))
+        control_layout.addWidget(self.loop_smoothing_input)
+
+        self.n_centerline_points_input = QSpinBox()
+        self.n_centerline_points_input.setRange(50, 2000)
+        self.n_centerline_points_input.setValue(500)
+        self.n_centerline_points_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Centerline Points"))
+        control_layout.addWidget(self.n_centerline_points_input)
+
+        self.n_loop_points_input = QSpinBox()
+        self.n_loop_points_input.setRange(50, 500)
+        self.n_loop_points_input.setValue(100)
+        self.n_loop_points_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Loop Points"))
+        control_layout.addWidget(self.n_loop_points_input)
+
+        self.n_subset_points_input = QSpinBox()
+        self.n_subset_points_input.setRange(10, 100)
+        self.n_subset_points_input.setValue(20)
+        self.n_subset_points_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Subset Points"))
+        control_layout.addWidget(self.n_subset_points_input)
+
+        self.marching_record_step_input = QSpinBox()
+        self.marching_record_step_input.setRange(1, 10)
+        self.marching_record_step_input.setValue(5)
+        self.marching_record_step_input.setEnabled(False)
+        control_layout.addWidget(QLabel("Marching Record Step"))
+        control_layout.addWidget(self.marching_record_step_input)
+
+        # Export to Visualizer button (bottom of left panel)
+        self.export_btn = QPushButton("Export to Visualizer")
+        self.export_btn.clicked.connect(self.export_to_visualizer)
+        control_layout.addWidget(self.export_btn)
+
+        control_layout.addStretch()
+        left_panel = QWidget()
+        left_panel.setLayout(control_layout)
+        main_layout.addWidget(left_panel, 1)
+
+        # Plot Area
+        self.plotter = self.pvqt_interactor()
+        main_layout.addWidget(self.plotter.interactor, 4)
 
         # State
         self.input_file = None
-        self.mesh_poly = None
+        self.msh_file = "generated_mesh.msh"
+        self.surf_poly = None
+        self.raw_centerline_forward = None
+        self.loopA = None
+        self.loopB = None
+        self.marching_record_forward = None
+        self.final_centerline = None
+        self.final_centerline_poly = None
+        self.surface_curves = None
 
-    def import_file(self):
-        file_name, _ = QFileDialog.getOpenFileName(
-            self, "Open File", "", "Mesh/CAD Files (*.stl *.step *.stp)"
-        )
-        if file_name:
-            self.input_file = file_name
-            self.file_label.setText(f"Loaded: {os.path.basename(file_name)}")
-            self.plotter.clear()
-            self.mesh_poly = None
+        # File type filter state
+        self.accept_stl = True
+        self.accept_stp = False
+        self.sizing_mode = "uniform"
 
-    def process_mesh(self):
+    def pvqt_interactor(self):
+        from pyvistaqt import QtInteractor
+        return QtInteractor(self)
+
+    def set_accept_stl(self):
+        self.accept_stl = True
+        self.accept_stp = False
+        self.stp_sizing_dropdown.setEnabled(False)
+        self.element_size_input.setEnabled(False)
+        self.max_element_size_factor_input.setEnabled(False)
+        self.trim_points_input.setEnabled(False)
+        self.centerline_s_input.setEnabled(False)
+        self.surfacecurves_s_input.setEnabled(False)
+        self.n_centerline_points_input.setEnabled(False)
+        self.n_loop_points_input.setEnabled(False)
+        self.n_subset_points_input.setEnabled(False)
+        self.marching_record_step_input.setEnabled(False)
+
+    def set_accept_stp(self):
+        self.accept_stl = False
+        self.accept_stp = True
+        self.stp_sizing_dropdown.setEnabled(True)
+        self.element_size_input.setEnabled(True)
+        self.max_element_size_factor_input.setEnabled(True)
+        self.trim_points_input.setEnabled(True)
+        self.centerline_s_input.setEnabled(True)
+        self.surfacecurves_s_input.setEnabled(True)
+        self.n_centerline_points_input.setEnabled(True)
+        self.n_loop_points_input.setEnabled(True)
+        self.n_subset_points_input.setEnabled(True)
+        self.marching_record_step_input.setEnabled(True)
+
+    def load_file(self):
+        file_dialog = QFileDialog()
+        file_filter = ""
+        if self.accept_stl:
+            file_filter = "STL Files (*.stl)"
+        elif self.accept_stp:
+            file_filter = "STEP Files (*.stp *.step)"
+        else:
+            file_filter = "Mesh Files (*.msh)" # This option should not be reached 
+
+        self.input_file, _ = file_dialog.getOpenFileName(self, "Open File", "", file_filter)
         if not self.input_file:
-            QMessageBox.warning(self, "No File", "Please import an STL or STEP file first.")
             return
+        self.loaded_file.setText(f"Loaded: {os.path.basename(self.input_file)}")
+        self.btn_process.setEnabled(True)
+
+    def clear_plot(self):
+        self.plotter.clear()
+        self.status_label.setText("Status: Plot Cleared")
+
+    def stp_check(self, argument, default):
+        return argument if self.accept_stp else default
+
+    def generate_centerline(self):
+        import logging
         try:
-            element_size = float(self.element_size_input.text())
-            size_factor = float(self.size_factor_input.text())
-            sizing_mode = self.sizing_mode_combo.currentText()
-            mesh_filename = "generated_mesh.msh"
-            poly = self.helpers.load_surface_mesh(
-                self.input_file, mesh_filename, element_size, size_factor, sizing_mode
-            )
-            self.mesh_poly = poly
             self.plotter.clear()
-            self.plotter.add_mesh(poly, color="lightblue", opacity=0.7, label="Surface Mesh")
-            self.plotter.reset_camera()
+            self.element_size = self.element_size_input.value()
+            self.max_element_size_factor = self.max_element_size_factor_input.value()
+            self.feature_angle = self.feature_angle_input.value()
+            self.trim_points = self.trim_points_input.value()
+            self.centerline_s = self.centerline_s_input.value()
+            self.surfacecurves_s = self.surfacecurves_s_input.value()
+            self.loop_smoothing = self.loop_smoothing_input.value()
+            self.n_centerline_points = self.n_centerline_points_input.value()
+            self.n_loop_points = self.n_loop_points_input.value()
+            self.n_subset_points = self.n_subset_points_input.value()
+
+            if self.input_file:
+                self.surf_poly = self.helpers.load_surface_mesh(
+                    self.input_file, self.msh_file,
+                    self.stp_check(self.element_size, 0.15),
+                    self.stp_check(self.max_element_size_factor, 2.0),
+                    self.sizing_mode
+                )
+            else:
+                logging.error(f"Unsupported File format: {self.input_file}")
+                return
+
+            self.loopA, self.loopB = self.helpers.extract_coil_end_loops(
+                self.surf_poly,
+                self.stp_check(self.feature_angle, 75)
+            )
+
+            self.raw_centerline_forward, self.marching_record_forward = \
+                self.helpers.compute_centerline_3d_mce(
+                    self.surf_poly,
+                    self.loopA,
+                    self.loopB
+                )
+            if self.raw_centerline_forward is None:
+                logging.error("Failed to compute centerline.")
+                return
+
+            filtered_fwd = self.helpers.trim_end(self.raw_centerline_forward, self.stp_check(self.trim_points, 0))
+            self.final_centerline = filtered_fwd
+            self.final_centerline_poly = self.helpers.create_polyline(
+                self.final_centerline,
+                closed=False
+            )
+
+            self.helpers.plot_marching_record(
+                self.surf_poly,
+                self.final_centerline,
+                self.loopA,
+                self.loopB,
+                self.marching_record_forward,
+                step=self.stp_check(self.marching_record_step_input.value(), 5),
+                plotter=self.plotter
+            )
+
+            self.status_label.setText(
+                "Current marching record shown. Please confirm before continuing."
+            )
+
         except Exception as e:
-            QMessageBox.critical(self, "Mesh Error", f"Mesh processing failed:\n{e}")
+            import logging
+            logging.exception("Error during centerline generation")
+            self.status_label.setText("Error: See log in terminal")
+
+    def generate_surface_curves(self):
+        import logging
+        try:
+            self.plotter.clear()
+            self.element_size = self.element_size_input.value()
+            self.max_element_size_factor = self.max_element_size_factor_input.value()
+            self.feature_angle = self.feature_angle_input.value()
+            self.trim_points = self.trim_points_input.value()
+            self.centerline_s = self.centerline_s_input.value()
+            self.surfacecurves_s = self.surfacecurves_s_input.value()
+            self.loop_smoothing = self.loop_smoothing_input.value()
+            self.n_centerline_points = self.n_centerline_points_input.value()
+            self.n_loop_points = self.n_loop_points_input.value()
+            self.n_subset_points = self.n_subset_points_input.value()
+
+            logging.info("Refining end loop A...")
+            loopA_ordered = self.helpers.order_loop_points_pca(self.loopA.points)
+            refined_loopA_pts = self.helpers.refine_loop(self.pv.PolyData(loopA_ordered), n_points=self.stp_check(self.n_loop_points, 200), smoothing=self.stp_check(self.loop_smoothing, 0), spline_degree=3)
+            refined_loopA_poly = self.helpers.create_polyline(refined_loopA_pts, closed=True)
+
+            logging.info("Refining end loop B...")
+            loopB_ordered = self.helpers.order_loop_points_pca(self.loopB.points)
+            refined_loopB_pts = self.helpers.refine_loop(self.pv.PolyData(loopB_ordered), n_points=self.stp_check(self.n_loop_points, 200), smoothing=self.stp_check(self.loop_smoothing, 0), spline_degree=3)
+            refined_loopB_poly = self.helpers.create_polyline(refined_loopB_pts, closed=True)
+
+            centerpoint_A = self.final_centerline[0]
+            centerpoint_B = self.final_centerline[-1]
+            contours_A = self.helpers.generate_intermediate_contours(refined_loopA_pts, centerpoint_A, n_contours=5)
+            contours_B = self.helpers.generate_intermediate_contours(refined_loopB_pts, centerpoint_B, n_contours=5)
+
+            logging.info("Building no-roll frames along the centerline...")
+            n_vecs, x_vecs, y_vecs = self.helpers.build_no_roll_frames(self.final_centerline)
+
+            logging.info("Generating scaffold cross sections along the centerline...")
+            cross_sections_scaffold = []
+            for i in range(len(self.final_centerline)):
+                if i == 0:
+                    cross_sections_scaffold.append(refined_loopA_pts)
+                    continue
+                elif i == len(self.final_centerline) - 1:
+                    cross_sections_scaffold.append(refined_loopB_pts)
+                    continue
+                center = self.final_centerline[i]
+                n_i = n_vecs[i]
+                x_i = x_vecs[i]
+                y_i = y_vecs[i]
+                sliced = self.helpers.slice_surface_at_point(self.surf_poly, center, n_i)
+                if sliced is None or sliced.n_points < 3:
+                    cross_sections_scaffold.append(None)
+                    continue
+                loops_sliced = sliced.split_bodies()
+                if isinstance(loops_sliced, self.pv.MultiBlock):
+                    slice_loop = max(loops_sliced, key=lambda lp: lp.length)
+                else:
+                    slice_loop = loops_sliced
+                if slice_loop is None or slice_loop.n_points < 3:
+                    cross_sections_scaffold.append(None)
+                    continue
+                raw_pts = slice_loop.points.copy()
+                angles_indices = []
+                for idx_pt, pt in enumerate(raw_pts):
+                    v = pt - center
+                    angle = np.arctan2(np.dot(v, y_i), np.dot(v, x_i))
+                    angles_indices.append((angle, idx_pt))
+                angles_indices.sort(key=lambda x: x[0])
+                sorted_pts = raw_pts[[idx for (_, idx) in angles_indices]]
+                sorted_pts = self.helpers.ensure_closed(sorted_pts)
+                refined_pts = self.helpers.refine_loop(self.pv.PolyData(sorted_pts), n_points=self.stp_check(self.n_loop_points, 200), smoothing=self.stp_check(self.loop_smoothing, 0), spline_degree=3)
+                cross_sections_scaffold.append(refined_pts)
+
+            logging.info("Selecting evenly spaced subset points from refined Loop A...")
+            subset_points = self.helpers.select_evenly_spaced_subset(refined_loopA_pts, small_N=self.stp_check(self.n_subset_points, 20))
+            subset_thetas = self.helpers.compute_theta_for_subset_points(subset_points, centerpoint_A, x_vecs[0], y_vecs[0])
+            subset_r_initial = np.sqrt(np.sum((subset_points - centerpoint_A) ** 2, axis=1))
+
+            logging.info("Generating surface curves...")
+            surface_curves = self.helpers.generate_surface_curves(
+                cross_sections_scaffold=cross_sections_scaffold,
+                centerline_points=self.final_centerline,
+                n_vecs=n_vecs,
+                x_vecs=x_vecs,
+                y_vecs=y_vecs,
+                subset_thetas=subset_thetas,
+                subset_r_initial=subset_r_initial,
+                subset_points=subset_points
+            )
+
+            trimmed_surface_curves = []
+            for curve in surface_curves:
+                trimmed = self.helpers.trim_end(curve, self.stp_check(self.trim_points, 0))
+                trimmed_surface_curves.append(trimmed)
+
+            smoothed_surface_curves = [self.helpers.smooth_surface_curve(curve, s=self.stp_check(self.surfacecurves_s, 0.2), k=3, n_interp=self.stp_check(self.n_centerline_points, 200)) for curve in trimmed_surface_curves]
+
+            self.plotter.add_mesh(self.surf_poly, color="lightblue", opacity=0.5, label="Surface Mesh")
+            self.plotter.add_mesh(self.final_centerline_poly, color="magenta", line_width=3, label="Centerline")
+            self.plotter.add_mesh(refined_loopA_poly, color="red", line_width=2, label="Loop A")
+            self.plotter.add_mesh(refined_loopB_poly, color="green", line_width=2, label="Loop B")
+
+            subset_poly = self.pv.PolyData(subset_points)
+            self.plotter.add_mesh(subset_poly, color="red", point_size=5, render_points_as_spheres=True, label="Subset Points")
+
+            raw_points = np.vstack([curve for curve in surface_curves if len(curve) > 0])
+            raw_points_poly = self.pv.PolyData(raw_points)
+            self.plotter.add_mesh(raw_points_poly, color="red", point_size=2, render_points_as_spheres=True, label="Raw Surface Curve Points")
+
+            for idx, curve in enumerate(smoothed_surface_curves):
+                poly = self.helpers.create_polyline(curve, closed=False)
+                self.plotter.add_mesh(poly, color="cyan", line_width=3, label=f"Surface Curve {idx}" if idx == 0 else None)
+
+            for i in range(0, len(cross_sections_scaffold), 5):
+                cs = cross_sections_scaffold[i]
+                if cs is None:
+                    continue
+                cs_poly = self.helpers.create_polyline(cs, closed=True)
+                self.plotter.add_mesh(cs_poly, color="blue", line_width=1, label=f"Cross Section {i}" if i == 0 else None)
+
+            for contour in contours_A + contours_B:
+                poly = self.helpers.create_polyline(contour, closed=True)
+                self.plotter.add_mesh(poly, color="yellow", line_width=2, opacity=0.8)
+
+            self.plotter.add_legend(bcolor="white")
+            self.plotter.reset_camera()
+            self.status_label.setText("Surface Curves Generated")
+
+            self.surface_curves = smoothed_surface_curves
+
+        except Exception as e:
+            import logging
+            logging.exception("Error during surface curve generation")
+            self.status_label.setText("Error: See log in terminal")
 
     def export_to_visualizer(self):
-        if self.mesh_poly is None:
-            QMessageBox.warning(self, "No Mesh", "No mesh to export. Please process a mesh first.")
+        from PyQt5.QtWidgets import QMessageBox
+        if self.final_centerline is None or self.surface_curves is None:
+            QMessageBox.warning(self, "No Data", "No centerline/surface curves to export. Please generate them first.")
             return
-        
         main_window = self.window()
         field_viz_tab = None
         if main_window and hasattr(main_window, 'tabs'):
-            # Finding the MagneticFieldVisualizer tab
             for i in range(main_window.tabs.count()):
                 widget = main_window.tabs.widget(i)
                 if widget.__class__.__name__ == 'MagneticFieldVisualizer':
                     field_viz_tab = widget
                     break
         if field_viz_tab:
-            # Set mesh in the visualizer
-            field_viz_tab.set_coil_data(None, [], self.mesh_poly)
-            # Switch to the visualizer tab
+            field_viz_tab.set_coil_data(self.final_centerline, self.surface_curves, self.surf_poly)
             for i in range(main_window.tabs.count()):
                 if main_window.tabs.widget(i) is field_viz_tab:
                     main_window.tabs.setCurrentIndex(i)
                     break
-            QMessageBox.information(self, "Export", "Mesh exported to Field Visualizer tab.")
+            QMessageBox.information(self, "Export", "Data exported to Field Visualizer tab.")
         else:
-            QMessageBox.information(self, "Export", "Mesh exported (but could not find Field Visualizer tab to update).")
+            QMessageBox.information(self, "Export", "Data exported (but could not find Field Visualizer tab to update).")
 
 
 class OptimizationTab(QWidget):
@@ -1275,7 +1615,7 @@ class OptimizationTab(QWidget):
     def initUI(self):
         main_layout = QVBoxLayout()
         
-        # Create tabs for different sections
+        # Create the tabs for the different sections
         tabs = QTabWidget()
         
         # Coil Parameters Tab
@@ -1781,7 +2121,7 @@ class OptimizationTab(QWidget):
         surface_curves = generate_surface_curves(coil_pts, self.selected_coil['cross_params'])
         self.field_viz_tab.set_coil_data(coil_pts, surface_curves)
         
-        # Switch to the visualizer tab
+        # Switch to visualizer tab
         main_window = self.window()
         if main_window and hasattr(main_window, 'tabs'):
             main_window.tabs.setCurrentIndex(2)  # Switch to Field Visualization tab
@@ -1794,7 +2134,7 @@ class OptimizationTab(QWidget):
 
 
 # ---------------------------
-# Main Window with New Tab Structure
+# Main Window
 # ---------------------------
 class MainWindow(QMainWindow):
     def __init__(self):
