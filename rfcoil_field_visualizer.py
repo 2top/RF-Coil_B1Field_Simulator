@@ -497,9 +497,6 @@ class MagneticFieldVisualizer(QWidget):
         self.export_button = QPushButton("Export Data")
         self.export_button.clicked.connect(self.export_data)
         self.controls_layout.addWidget(self.export_button)
-        self.exit_button = QPushButton("Exit")
-        self.exit_button.clicked.connect(self.exit_application)
-        self.controls_layout.addWidget(self.exit_button)
 
     def create_labeled_input(self, label_text: str, default_value: str, parent_layout, inline: bool = False) -> QLineEdit:
         if inline:
@@ -1301,7 +1298,12 @@ class MeshProcessorTab(QWidget):
         control_layout.addStretch()
         left_panel = QWidget()
         left_panel.setLayout(control_layout)
-        main_layout.addWidget(left_panel, 1)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(left_panel)
+        scroll_area.setMinimumWidth(450)
+        scroll_area.setMaximumWidth(450)
+        main_layout.addWidget(scroll_area, 1)
 
         # Plot Area
         self.plotter = self.pvqt_interactor()
