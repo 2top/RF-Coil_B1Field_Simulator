@@ -249,7 +249,7 @@ MU0_SI   = 4 * np.pi * 1e-7
 MU0_MM   = MU0_SI / MM_TO_M
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.WARNING, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 def compute_biot_savart_field(observation_points: np.ndarray,
@@ -345,9 +345,25 @@ class MagneticFieldVisualizer(QWidget):
         self.create_source_controls()
         self.create_compute_export_controls()
         
-        self.region_dropdown.currentIndexChanged.connect(self.update_inputs)
         self.field_type_dropdown.currentIndexChanged.connect(self.plot_magnetic_field)
         self.vector_scale_input.editingFinished.connect(self.plot_magnetic_field)
+        
+        # Connect all visibility checkboxes to refresh the current view
+        self.hide_centerline_checkbox.toggled.connect(self.refresh_current_view)
+        self.hide_surface_curves_checkbox.toggled.connect(self.refresh_current_view)
+        self.hide_coil_geometry_checkbox.toggled.connect(self.refresh_current_view)
+        self.hide_region_checkbox.toggled.connect(self.refresh_current_view)
+        self.hide_grid_checkbox.toggled.connect(self.refresh_current_view)
+        self.hide_axes_checkbox.toggled.connect(self.refresh_current_view)
+        self.exclude_interior_checkbox.toggled.connect(self.refresh_current_view)
+        self.exclusion_distance_input.editingFinished.connect(self.refresh_current_view)
+        
+        # Connect grid settings to refresh view
+        self.grid_spacing_input.editingFinished.connect(self.refresh_current_view)
+        self.grid_side_length_input.editingFinished.connect(self.refresh_current_view)
+        
+        # Connect region dropdown to refresh when changed (but only if there's something to refresh)
+        self.region_dropdown.currentIndexChanged.connect(self.on_region_type_changed)
         
         self.update_inputs()
 
@@ -361,6 +377,10 @@ class MagneticFieldVisualizer(QWidget):
             
         self.surface_curves = surface_curves
         self.surf_poly = surface_mesh
+        
+        # Automatically visualize region after data is set
+        if centerline is not None and surface_curves is not None:
+            self.visualize_region()
 
     def ensure_plotter(self) -> None:
         if getattr(self.plotter, "_closed", False):
@@ -466,18 +486,16 @@ class MagneticFieldVisualizer(QWidget):
 
     def create_compute_export_controls(self) -> None:
         self.field_type_lbl = QLabel("Select field type to compute:")
-        self.bfield_radio = QRadioButton("B-field (magnetic)")
-        self.efield_radio = QRadioButton("E-field (electric)")
-        self.bfield_radio.setChecked(True)
-        ft_layout = QHBoxLayout()
-        ft_layout.addWidget(self.bfield_radio)
-        ft_layout.addWidget(self.efield_radio)
+        self.field_compute_dropdown = QComboBox()
+        self.field_compute_dropdown.addItems(["B-field (magnetic)", "E-field (electric)"])
         self.controls_layout.addWidget(self.field_type_lbl)
-        self.controls_layout.addLayout(ft_layout)
+        self.controls_layout.addWidget(self.field_compute_dropdown)
+        
         freq_box = QHBoxLayout()
         freq_box.addWidget(QLabel("Frequency (MHz):"))
         self.freq_input = QLineEdit("400")
         self.freq_input.setFixedWidth(60)
+        self.freq_input.setEnabled(False)  # Greyed out by default
         freq_box.addWidget(self.freq_input)
         self.controls_layout.addLayout(freq_box)
         self.compute_field_button = QPushButton("Compute Field")
@@ -520,6 +538,55 @@ class MagneticFieldVisualizer(QWidget):
         self.volume_group.setVisible(region_type == "Volume")
         self.plane_group.setVisible(region_type == "Plane")
         self.line_group.setVisible(region_type == "Line")
+
+    def on_region_type_changed(self) -> None:
+        """Handle region type dropdown change"""
+        self.update_inputs()  # Update input visibility
+        # Only refresh if there's something displayed that would be affected
+        if self.last_region_points is not None:
+            self.refresh_current_view()
+
+    def refresh_current_view(self) -> None:
+        """Refresh the current visualization based on what was last displayed"""
+        # Determine what should be refreshed based on current state
+        if self.last_B is not None and self.last_region_points is not None:
+            # If magnetic field was computed and displayed, refresh that
+            self.plot_magnetic_field()
+        elif self.last_region_points is not None:
+            # If only region visualization was shown, refresh that
+            self.visualize_region()
+        else:
+            # If nothing specific was shown, refresh basic coil visualization
+            self.refresh_basic_visualization()
+
+    def refresh_basic_visualization(self) -> None:
+        """Refresh basic coil visualization (mesh, centerline, surface curves, axes)"""
+        self.ensure_plotter()
+        self.plotter.clear()
+        
+        # Add surface mesh if available and not hidden
+        if self.surf_poly is not None and not self.hide_coil_geometry_checkbox.isChecked():
+            self.plotter.add_mesh(self.surf_poly, color="lightblue", opacity=0.5, label="Surface Mesh")
+        
+        # Add centerline if available and not hidden
+        if self.centerline is not None and not self.hide_centerline_checkbox.isChecked():
+            self.plotter.add_mesh(self.centerline, color="magenta", line_width=3, label="Centerline")
+        
+        # Add surface curves if available and not hidden
+        if self.surface_curves is not None and len(self.surface_curves) > 0 and not self.hide_surface_curves_checkbox.isChecked():
+            for idx, curve in enumerate(self.surface_curves):
+                if len(curve) > 1:
+                    curve_poly = pv.PolyData(curve.astype(np.float32))
+                    curve_poly.lines = np.hstack([[len(curve)], np.arange(len(curve))])
+                    self.plotter.add_mesh(curve_poly, color="cyan", line_width=3, 
+                                        label=f"Surface Curve {idx}" if idx == 0 else None)
+        
+        # Add coordinate axes if not hidden
+        if not self.hide_axes_checkbox.isChecked():
+            self.add_coordinate_system()
+        
+        # Add grid points if not hidden
+        self.add_grey_points()
 
     def get_volume_region_points(self) -> np.ndarray:
         try:
@@ -752,10 +819,11 @@ class MagneticFieldVisualizer(QWidget):
                     epoly = pv.PolyData(endpoints)
                     self.plotter.add_mesh(epoly, color="red", point_size=8,
                                           render_points_as_spheres=True, label="Line Endpoints")
-                else:
+                elif pts.shape[0] == 1:
+                    # Single point - render without spheres to avoid errors
                     line_poly = pv.PolyData(pts)
-                    self.plotter.add_mesh(line_poly, color="orange", point_size=6,
-                                          render_points_as_spheres=True, label="Line Points")
+                    self.plotter.add_mesh(line_poly, color="orange", point_size=10, label="Line Point")
+                # If 0 points, don't try to visualize
         if self.surface_curves is not None and len(self.surface_curves) > 0 and not self.hide_surface_curves_checkbox.isChecked():
             for curve in self.surface_curves:
                 if len(curve) < 2:
@@ -801,7 +869,7 @@ class MagneticFieldVisualizer(QWidget):
                 return
             coil_points = self.centerline.points
 
-        computing_B = self.bfield_radio.isChecked()
+        computing_B = (self.field_compute_dropdown.currentText() == "B-field (magnetic)")
 
         if computing_B:
             B_total = np.zeros((region_points.shape[0], 3), dtype=np.float64)
@@ -900,7 +968,12 @@ class MagneticFieldVisualizer(QWidget):
             field_poly["B"] = B
             field_poly["Bmag"] = Bmag
             arrows = field_poly.glyph(orient="B", scale=False, factor=vector_scale)
-            arrows["Bmag"] = np.repeat(Bmag, arrows.n_points // region_points.shape[0])
+            # Safer calculation for scalar assignment to handle edge cases
+            n_arrows = arrows.n_points
+            n_region = region_points.shape[0]
+            if n_region > 0 and n_arrows > 0:
+                repeat_factor = n_arrows // n_region if n_arrows >= n_region else 1
+                arrows["Bmag"] = np.repeat(Bmag, repeat_factor)[:n_arrows]
             self.plotter.add_mesh(arrows, scalars="Bmag", cmap="jet",
                                   scalar_bar_args={"title": "|B| (T)"})
         elif field_type == "Vector, Magnitude & Direction":
@@ -911,7 +984,12 @@ class MagneticFieldVisualizer(QWidget):
             field_poly["B"] = B
             field_poly["Bmag"] = Bmag
             arrows = field_poly.glyph(orient="B", scale="Bmag", factor=scale_factor)
-            arrows["Bmag"] = np.repeat(Bmag, arrows.n_points // region_points.shape[0])
+            # Safer calculation for scalar assignment
+            n_arrows = arrows.n_points
+            n_region = region_points.shape[0]
+            if n_region > 0 and n_arrows > 0:
+                repeat_factor = n_arrows // n_region if n_arrows >= n_region else 1
+                arrows["Bmag"] = np.repeat(Bmag, repeat_factor)[:n_arrows]
             self.plotter.add_mesh(arrows, scalars="Bmag", cmap="jet",
                                   scalar_bar_args={"title": "|B| (T)","fmt": "%.2e"})
         elif field_type == "Magnitude":
@@ -937,7 +1015,12 @@ class MagneticFieldVisualizer(QWidget):
             field_poly["Bx_dir"] = bx_dir
             field_poly["Bx_len"] = bx_abs
             arrows = field_poly.glyph(orient="Bx_dir", scale="Bx_len", factor=scale_factor)
-            arrows["BxAbs"] = np.repeat(bx_abs, arrows.n_points // region_points.shape[0])
+            # Safer calculation for scalar assignment
+            n_arrows = arrows.n_points
+            n_region = region_points.shape[0]
+            if n_region > 0 and n_arrows > 0:
+                repeat_factor = n_arrows // n_region if n_arrows >= n_region else 1
+                arrows["BxAbs"] = np.repeat(bx_abs, repeat_factor)[:n_arrows]
             self.plotter.add_mesh(arrows, scalars="BxAbs", cmap="jet",
                                   scalar_bar_args={"title": "|Bx| (T)","fmt": "%.2e"})
         elif field_type == "By (Color Only)":
@@ -958,7 +1041,12 @@ class MagneticFieldVisualizer(QWidget):
             field_poly["By_dir"] = by_dir
             field_poly["By_len"] = by_abs
             arrows = field_poly.glyph(orient="By_dir", scale="By_len", factor=scale_factor)
-            arrows["ByAbs"] = np.repeat(by_abs, arrows.n_points // region_points.shape[0])
+            # Safer calculation for scalar assignment
+            n_arrows = arrows.n_points
+            n_region = region_points.shape[0]
+            if n_region > 0 and n_arrows > 0:
+                repeat_factor = n_arrows // n_region if n_arrows >= n_region else 1
+                arrows["ByAbs"] = np.repeat(by_abs, repeat_factor)[:n_arrows]
             self.plotter.add_mesh(arrows, scalars="ByAbs", cmap="jet",
                                   scalar_bar_args={"title": "|By| (T)","fmt": "%.2e"})
         elif field_type == "Bz (Color Only)":
@@ -979,7 +1067,12 @@ class MagneticFieldVisualizer(QWidget):
             field_poly["Bz_dir"] = bz_dir
             field_poly["Bz_len"] = bz_abs
             arrows = field_poly.glyph(orient="Bz_dir", scale="Bz_len", factor=scale_factor)
-            arrows["BzAbs"] = np.repeat(bz_abs, arrows.n_points // region_points.shape[0])
+            # Safer calculation for scalar assignment
+            n_arrows = arrows.n_points
+            n_region = region_points.shape[0]
+            if n_region > 0 and n_arrows > 0:
+                repeat_factor = n_arrows // n_region if n_arrows >= n_region else 1
+                arrows["BzAbs"] = np.repeat(bz_abs, repeat_factor)[:n_arrows]
             self.plotter.add_mesh(arrows, scalars="BzAbs", cmap="jet",
                                   scalar_bar_args={"title": "|Bz| (T)"})
         self.vtk_widget.interactor.GetRenderWindow().SetWindowName(f"B-field Visualization: {field_type}")
@@ -996,7 +1089,7 @@ class MagneticFieldVisualizer(QWidget):
         pts = self.last_region_points
         self.plotter.clear()
         if self.surf_poly is not None and not self.hide_coil_geometry_checkbox.isChecked():
-            self.plotter.add_mesh(self.surf_poly, color="light")
+            self.plotter.add_mesh(self.surf_poly, color="lightblue", opacity=0.5)
 
         if self.centerline is not None and not self.hide_centerline_checkbox.isChecked():
             self.plotter.add_mesh(self.centerline, color="magenta", line_width=2)
@@ -1018,7 +1111,12 @@ class MagneticFieldVisualizer(QWidget):
         if max_e < EPSILON:
             max_e = 1.0
         arrows = field_poly.glyph(orient="E", scale="Emag", factor=vscale / max_e)
-        arrows["Emag"] = np.repeat(Emag, arrows.n_points // pts.shape[0])
+        # Safer calculation for scalar assignment
+        n_arrows = arrows.n_points
+        n_region = pts.shape[0]
+        if n_region > 0 and n_arrows > 0:
+            repeat_factor = n_arrows // n_region if n_arrows >= n_region else 1
+            arrows["Emag"] = np.repeat(Emag, repeat_factor)[:n_arrows]
         self.plotter.add_mesh(
             arrows,
             scalars="Emag",
@@ -1050,10 +1148,11 @@ class MagneticFieldVisualizer(QWidget):
                 epoly = pv.PolyData(endpoints)
                 self.plotter.add_mesh(epoly, color="red", point_size=8,
                                       render_points_as_spheres=True, label="Line Endpoints")
-            else:
+            elif region_points.shape[0] == 1:
+                # Single point - render without spheres to avoid errors
                 line_poly = pv.PolyData(region_points)
-                self.plotter.add_mesh(line_poly, color="orange", point_size=6,
-                                      render_points_as_spheres=True, label="Region Points")
+                self.plotter.add_mesh(line_poly, color="orange", point_size=10, label="Region Point")
+            # If 0 points, don't try to visualize
 
     def compute_inductance(self) -> None:
         if self.last_B is None or self.last_region_points is None:
@@ -1163,12 +1262,16 @@ class MeshProcessorTab(QWidget):
         self.stl_radio.toggled.connect(self.set_accept_stl)
         self.stp_radio = QRadioButton("Accept STP Files")
         self.stp_radio.toggled.connect(self.set_accept_stp)
+        self.msh_radio = QRadioButton("Accept MSH Files")
+        self.msh_radio.toggled.connect(self.set_accept_msh)
         filetype_group = QButtonGroup()
         filetype_group.addButton(self.stl_radio)
         filetype_group.addButton(self.stp_radio)
+        filetype_group.addButton(self.msh_radio)
         control_layout.addWidget(QLabel("File Type Filter:"))
         control_layout.addWidget(self.stl_radio)
         control_layout.addWidget(self.stp_radio)
+        control_layout.addWidget(self.msh_radio)
 
         self.btn_load_file = QPushButton("Load File")
         self.btn_load_file.clicked.connect(self.load_file)
@@ -1186,6 +1289,7 @@ class MeshProcessorTab(QWidget):
 
         self.btn_second_process = QPushButton("Generate Surface Curves")
         self.btn_second_process.clicked.connect(self.generate_surface_curves)
+        self.btn_second_process.setEnabled(False)
         self.btn_second_process.setToolTip("Generate surface curves for centerline")
         control_layout.addWidget(self.btn_second_process)
 
@@ -1228,6 +1332,7 @@ class MeshProcessorTab(QWidget):
         self.feature_angle_input = QSpinBox()
         self.feature_angle_input.setRange(0, 180)
         self.feature_angle_input.setValue(65)
+        self.feature_angle_input.setEnabled(False)
         control_layout.addWidget(QLabel("Feature Angle"))
         control_layout.addWidget(self.feature_angle_input)
 
@@ -1293,6 +1398,7 @@ class MeshProcessorTab(QWidget):
         # Export to Visualizer button (bottom of left panel)
         self.export_btn = QPushButton("Export to Visualizer")
         self.export_btn.clicked.connect(self.export_to_visualizer)
+        self.export_btn.setEnabled(False)
         control_layout.addWidget(self.export_btn)
 
         control_layout.addStretch()
@@ -1324,6 +1430,7 @@ class MeshProcessorTab(QWidget):
         # File type filter state
         self.accept_stl = True
         self.accept_stp = False
+        self.accept_msh = False
         self.sizing_mode = "uniform"
 
     def pvqt_interactor(self):
@@ -1333,6 +1440,7 @@ class MeshProcessorTab(QWidget):
     def set_accept_stl(self):
         self.accept_stl = True
         self.accept_stp = False
+        self.accept_msh = False
         self.stp_sizing_dropdown.setEnabled(False)
         self.element_size_input.setEnabled(False)
         self.max_element_size_factor_input.setEnabled(False)
@@ -1347,6 +1455,7 @@ class MeshProcessorTab(QWidget):
     def set_accept_stp(self):
         self.accept_stl = False
         self.accept_stp = True
+        self.accept_msh = False
         self.stp_sizing_dropdown.setEnabled(True)
         self.element_size_input.setEnabled(True)
         self.max_element_size_factor_input.setEnabled(True)
@@ -1354,6 +1463,28 @@ class MeshProcessorTab(QWidget):
         self.centerline_s_input.setEnabled(True)
         self.surfacecurves_s_input.setEnabled(True)
         self.n_centerline_points_input.setEnabled(True)
+        self.n_loop_points_input.setEnabled(True)
+        self.n_subset_points_input.setEnabled(True)
+        self.loop_smoothing_input.setEnabled(True)
+        self.marching_record_step_input.setEnabled(True)
+
+    def set_accept_msh(self):
+        self.accept_stl = False
+        self.accept_stp = False
+        self.accept_msh = True
+        # MSH files already have mesh, so disable mesh generation parameters
+        self.stp_sizing_dropdown.setEnabled(False)
+        self.element_size_input.setEnabled(False)
+        self.max_element_size_factor_input.setEnabled(False)
+        # But enable the processing parameters
+        self.trim_points_input.setEnabled(True)
+        self.centerline_s_input.setEnabled(True)
+        self.surfacecurves_s_input.setEnabled(True)
+        self.n_centerline_points_input.setEnabled(True)
+        self.n_loop_points_input.setEnabled(True)
+        self.n_subset_points_input.setEnabled(True)
+        self.loop_smoothing_input.setEnabled(True)
+        self.marching_record_step_input.setEnabled(True)
         self.n_loop_points_input.setEnabled(True)
         self.n_subset_points_input.setEnabled(True)
         self.marching_record_step_input.setEnabled(True)
@@ -1365,26 +1496,29 @@ class MeshProcessorTab(QWidget):
             file_filter = "STL Files (*.stl)"
         elif self.accept_stp:
             file_filter = "STEP Files (*.stp *.step)"
+        elif self.accept_msh:
+            file_filter = "Mesh Files (*.msh)"
         else:
-            file_filter = "Mesh Files (*.msh)" # This option should not be reached 
+            file_filter = "All Files (*.*)"
 
         self.input_file, _ = file_dialog.getOpenFileName(self, "Open File", "", file_filter)
         if not self.input_file:
             return
         self.loaded_file.setText(f"Loaded: {os.path.basename(self.input_file)}")
         self.btn_process.setEnabled(True)
-
-    def clear_plot(self):
-        self.plotter.clear()
-        self.status_label.setText("Status: Plot Cleared")
-
-    def stp_check(self, argument, default):
-        return argument if self.accept_stp else default
-
-    def generate_centerline(self):
+        self.feature_angle_input.setEnabled(True)
+        
+        # Automatically process the file after loading
+        self.process_loaded_file()
+    
+    def process_loaded_file(self):
+        """Process the loaded file: generate centerline, surface curves, and display everything"""
         import logging
         try:
+            self.status_label.setText("Status: Processing file...")
             self.plotter.clear()
+            
+            # Read parameters
             self.element_size = self.element_size_input.value()
             self.max_element_size_factor = self.max_element_size_factor_input.value()
             self.feature_angle = self.feature_angle_input.value()
@@ -1396,6 +1530,9 @@ class MeshProcessorTab(QWidget):
             self.n_loop_points = self.n_loop_points_input.value()
             self.n_subset_points = self.n_subset_points_input.value()
 
+            # 1. Load surface mesh
+            self.status_label.setText("Status: Loading and meshing file...")
+            QApplication.processEvents()
             if self.input_file:
                 self.surf_poly = self.helpers.load_surface_mesh(
                     self.input_file, self.msh_file,
@@ -1404,14 +1541,21 @@ class MeshProcessorTab(QWidget):
                     self.sizing_mode
                 )
             else:
-                logging.error(f"Unsupported File format: {self.input_file}")
+                logging.error(f"No input file selected")
+                self.status_label.setText("Status: Error - No file selected")
                 return
 
+            # 2. Extract end loops
+            self.status_label.setText("Status: Extracting coil end loops...")
+            QApplication.processEvents()
             self.loopA, self.loopB = self.helpers.extract_coil_end_loops(
                 self.surf_poly,
                 self.stp_check(self.feature_angle, 75)
             )
 
+            # 3. Generate centerline
+            self.status_label.setText("Status: Computing centerline (this may take a moment)...")
+            QApplication.processEvents()
             self.raw_centerline_forward, self.marching_record_forward = \
                 self.helpers.compute_centerline_3d_mce(
                     self.surf_poly,
@@ -1420,70 +1564,45 @@ class MeshProcessorTab(QWidget):
                 )
             if self.raw_centerline_forward is None:
                 logging.error("Failed to compute centerline.")
+                self.status_label.setText("Status: Error - Failed to compute centerline")
                 return
 
+            self.status_label.setText("Status: Processing centerline...")
+            QApplication.processEvents()
             filtered_fwd = self.helpers.trim_end(self.raw_centerline_forward, self.stp_check(self.trim_points, 0))
             self.final_centerline = filtered_fwd
-            self.final_centerline_poly = self.helpers.create_polyline(
-                self.final_centerline,
-                closed=False
-            )
+            self.final_centerline_poly = self.helpers.create_polyline(self.final_centerline, closed=False)
 
-            self.helpers.plot_marching_record(
-                self.surf_poly,
-                self.final_centerline,
-                self.loopA,
-                self.loopB,
-                self.marching_record_forward,
-                step=self.stp_check(self.marching_record_step_input.value(), 5),
-                plotter=self.plotter
-            )
-
-            self.status_label.setText(
-                "Current marching record shown. Please confirm before continuing."
-            )
-
-        except Exception as e:
-            import logging
-            logging.exception("Error during centerline generation")
-            self.status_label.setText("Error: See log in terminal")
-
-    def generate_surface_curves(self):
-        import logging
-        try:
-            self.plotter.clear()
-            self.element_size = self.element_size_input.value()
-            self.max_element_size_factor = self.max_element_size_factor_input.value()
-            self.feature_angle = self.feature_angle_input.value()
-            self.trim_points = self.trim_points_input.value()
-            self.centerline_s = self.centerline_s_input.value()
-            self.surfacecurves_s = self.surfacecurves_s_input.value()
-            self.loop_smoothing = self.loop_smoothing_input.value()
-            self.n_centerline_points = self.n_centerline_points_input.value()
-            self.n_loop_points = self.n_loop_points_input.value()
-            self.n_subset_points = self.n_subset_points_input.value()
-
-            logging.info("Refining end loop A...")
+            # 4. Generate surface curves
+            self.status_label.setText("Status: Refining end loops...")
             loopA_ordered = self.helpers.order_loop_points_pca(self.loopA.points)
             refined_loopA_pts = self.helpers.refine_loop(self.pv.PolyData(loopA_ordered), n_points=self.stp_check(self.n_loop_points, 200), smoothing=self.stp_check(self.loop_smoothing, 0), spline_degree=3)
             refined_loopA_poly = self.helpers.create_polyline(refined_loopA_pts, closed=True)
 
-            logging.info("Refining end loop B...")
             loopB_ordered = self.helpers.order_loop_points_pca(self.loopB.points)
             refined_loopB_pts = self.helpers.refine_loop(self.pv.PolyData(loopB_ordered), n_points=self.stp_check(self.n_loop_points, 200), smoothing=self.stp_check(self.loop_smoothing, 0), spline_degree=3)
             refined_loopB_poly = self.helpers.create_polyline(refined_loopB_pts, closed=True)
 
+            self.status_label.setText("Status: Building reference frames...")
             centerpoint_A = self.final_centerline[0]
             centerpoint_B = self.final_centerline[-1]
             contours_A = self.helpers.generate_intermediate_contours(refined_loopA_pts, centerpoint_A, n_contours=5)
             contours_B = self.helpers.generate_intermediate_contours(refined_loopB_pts, centerpoint_B, n_contours=5)
 
-            logging.info("Building no-roll frames along the centerline...")
             n_vecs, x_vecs, y_vecs = self.helpers.build_no_roll_frames(self.final_centerline)
 
-            logging.info("Generating scaffold cross sections along the centerline...")
+            self.status_label.setText("Status: Generating cross-sections...")
             cross_sections_scaffold = []
-            for i in range(len(self.final_centerline)):
+            total_sections = len(self.final_centerline)
+            
+            for i in range(total_sections):
+                # Update progress every 10% of sections
+                if i % max(1, total_sections // 10) == 0:
+                    progress = int((i / total_sections) * 100)
+                    self.status_label.setText(f"Status: Generating cross-sections... {progress}% complete")
+                    # Force GUI update during long computation
+                    QApplication.processEvents()
+                
                 if i == 0:
                     cross_sections_scaffold.append(refined_loopA_pts)
                     continue
@@ -1518,12 +1637,13 @@ class MeshProcessorTab(QWidget):
                 refined_pts = self.helpers.refine_loop(self.pv.PolyData(sorted_pts), n_points=self.stp_check(self.n_loop_points, 200), smoothing=self.stp_check(self.loop_smoothing, 0), spline_degree=3)
                 cross_sections_scaffold.append(refined_pts)
 
-            logging.info("Selecting evenly spaced subset points from refined Loop A...")
+            self.status_label.setText("Status: Preparing surface curve generation...")
             subset_points = self.helpers.select_evenly_spaced_subset(refined_loopA_pts, small_N=self.stp_check(self.n_subset_points, 20))
             subset_thetas = self.helpers.compute_theta_for_subset_points(subset_points, centerpoint_A, x_vecs[0], y_vecs[0])
             subset_r_initial = np.sqrt(np.sum((subset_points - centerpoint_A) ** 2, axis=1))
 
-            logging.info("Generating surface curves...")
+            self.status_label.setText("Status: Generating surface curves...")
+            QApplication.processEvents()
             surface_curves = self.helpers.generate_surface_curves(
                 cross_sections_scaffold=cross_sections_scaffold,
                 centerline_points=self.final_centerline,
@@ -1535,6 +1655,8 @@ class MeshProcessorTab(QWidget):
                 subset_points=subset_points
             )
 
+            self.status_label.setText("Status: Smoothing surface curves...")
+            QApplication.processEvents()
             trimmed_surface_curves = []
             for curve in surface_curves:
                 trimmed = self.helpers.trim_end(curve, self.stp_check(self.trim_points, 0))
@@ -1542,6 +1664,12 @@ class MeshProcessorTab(QWidget):
 
             smoothed_surface_curves = [self.helpers.smooth_surface_curve(curve, s=self.stp_check(self.surfacecurves_s, 0.2), k=3, n_interp=self.stp_check(self.n_centerline_points, 200)) for curve in trimmed_surface_curves]
 
+            # Store for potential export
+            self.surface_curves = smoothed_surface_curves
+
+            # 5. Display everything
+            self.status_label.setText("Status: Rendering visualization...")
+            QApplication.processEvents()
             self.plotter.add_mesh(self.surf_poly, color="lightblue", opacity=0.5, label="Surface Mesh")
             self.plotter.add_mesh(self.final_centerline_poly, color="magenta", line_width=3, label="Centerline")
             self.plotter.add_mesh(refined_loopA_poly, color="red", line_width=2, label="Loop A")
@@ -1549,10 +1677,6 @@ class MeshProcessorTab(QWidget):
 
             subset_poly = self.pv.PolyData(subset_points)
             self.plotter.add_mesh(subset_poly, color="red", point_size=5, render_points_as_spheres=True, label="Subset Points")
-
-            raw_points = np.vstack([curve for curve in surface_curves if len(curve) > 0])
-            raw_points_poly = self.pv.PolyData(raw_points)
-            self.plotter.add_mesh(raw_points_poly, color="red", point_size=2, render_points_as_spheres=True, label="Raw Surface Curve Points")
 
             for idx, curve in enumerate(smoothed_surface_curves):
                 poly = self.helpers.create_polyline(curve, closed=False)
@@ -1571,14 +1695,63 @@ class MeshProcessorTab(QWidget):
 
             self.plotter.add_legend(bcolor="white")
             self.plotter.reset_camera()
-            self.status_label.setText("Surface Curves Generated")
+                
+            self.status_label.setText("Status: Processing complete. Centerline and surface curves generated.")
+            
+            # Enable buttons now that we have data
+            self.btn_second_process.setEnabled(True)
+            self.export_btn.setEnabled(True)
+                
+        except Exception as e:
+            logging.exception("Error during file processing")
+            self.status_label.setText("Status: Processing failed - see terminal for details")
 
-            self.surface_curves = smoothed_surface_curves
+    def clear_plot(self):
+        self.plotter.clear()
+        self.status_label.setText("Status: Plot Cleared")
+
+    def stp_check(self, argument, default):
+        return argument if self.accept_stp else default
+
+    def generate_centerline(self):
+        """Show marching record diagnostic view (only useful if data already exists)"""
+        import logging
+        try:
+            # Check if data exists from file processing
+            if not hasattr(self, 'final_centerline') or self.final_centerline is None:
+                self.status_label.setText("Please load a file first.")
+                return
+            
+            # Clear and show only the marching record visualization (diagnostic view)
+            self.plotter.clear()
+            self.helpers.plot_marching_record(
+                self.surf_poly,
+                self.final_centerline,
+                self.loopA,
+                self.loopB,
+                self.marching_record_forward,
+                step=self.stp_check(self.marching_record_step_input.value(), 5),
+                plotter=self.plotter
+            )
+
+            self.status_label.setText("Marching record diagnostic view shown.")
+            
+            # Enable surface curves button since centerline data exists
+            self.btn_second_process.setEnabled(True)
 
         except Exception as e:
             import logging
-            logging.exception("Error during surface curve generation")
+            logging.exception("Error showing marching record")
             self.status_label.setText("Error: See log in terminal")
+
+    def generate_surface_curves(self):
+        """Show full visualization (same as after file loading - for convenience)"""
+        if not hasattr(self, 'surface_curves') or self.surface_curves is None:
+            self.status_label.setText("Please load a file first.")
+            return
+        
+        # Re-run the same visualization that was shown after file processing
+        self.process_loaded_file()
 
     def export_to_visualizer(self):
         from PyQt5.QtWidgets import QMessageBox
@@ -1615,18 +1788,23 @@ class OptimizationTab(QWidget):
         self.initUI()
         
     def initUI(self):
-        main_layout = QVBoxLayout()
+        # Main layout: left panel for controls, right panel for visualization
+        main_layout = QHBoxLayout()
+        
+        # Left panel with tabs for parameters
+        left_panel = QVBoxLayout()
         
         # Create the tabs for the different sections
         tabs = QTabWidget()
+        tabs.setMaximumWidth(500)
         
         # Coil Parameters Tab
         coil_tab = self.create_coil_tab()
         tabs.addTab(coil_tab, "Coil Parameters")
         
-        # Cross Section Tab
-        cross_tab = self.create_cross_tab()
-        tabs.addTab(cross_tab, "Cross Section")
+        # Cross Section Tab - Hidden for now (redundant with r0 in parameters)
+        # cross_tab = self.create_cross_tab()
+        # tabs.addTab(cross_tab, "Cross Section")
         
         # Volume Tab
         volume_tab = self.create_volume_tab()
@@ -1636,15 +1814,10 @@ class OptimizationTab(QWidget):
         pop_tab = self.create_pop_tab()
         tabs.addTab(pop_tab, "Population")
         
-        main_layout.addWidget(tabs)
-        
-        # Visualization and buttons
-        self.vtk_widget = QtInteractor(self)
-        self.vtk_widget.setMinimumHeight(400)
-        main_layout.addWidget(self.vtk_widget, 1)
+        left_panel.addWidget(tabs)
         
         # Button layout
-        btn_layout = QHBoxLayout()
+        btn_layout = QVBoxLayout()
         self.visualize_btn = QPushButton("Visualize Base Coil")
         self.generate_btn = QPushButton("Generate Population")
         self.export_btn = QPushButton("Export to Visualizer")
@@ -1652,8 +1825,19 @@ class OptimizationTab(QWidget):
         btn_layout.addWidget(self.visualize_btn)
         btn_layout.addWidget(self.generate_btn)
         btn_layout.addWidget(self.export_btn)
+        btn_layout.addStretch()
         
-        main_layout.addLayout(btn_layout)
+        left_panel.addLayout(btn_layout)
+        
+        # Right panel for visualization
+        right_panel = QVBoxLayout()
+        self.vtk_widget = QtInteractor(self)
+        self.vtk_widget.setMinimumWidth(600)
+        right_panel.addWidget(self.vtk_widget)
+        
+        # Add both panels to main layout
+        main_layout.addLayout(left_panel)
+        main_layout.addLayout(right_panel, 1)
         
         # Connect signals
         self.visualize_btn.clicked.connect(self.visualize_base_coil)
@@ -1690,7 +1874,10 @@ class OptimizationTab(QWidget):
         
         for field in fields:
             hbox = QHBoxLayout()
-            hbox.addWidget(QLabel(field[0] + ":"))
+            label_text = field[0]
+            if field[0] == 'r0':
+                label_text = "r0 (Wire Radius)"
+            hbox.addWidget(QLabel(label_text + ":"))
             hbox.addWidget(self.create_line_edit(field[0], str(field[1])))
             hbox.addWidget(QLabel("min:"))
             hbox.addWidget(self.create_line_edit(field[2], str(field[3])))
@@ -1704,6 +1891,8 @@ class OptimizationTab(QWidget):
         hbox.addWidget(self.min_spacing_edit)
         hbox.addWidget(QLabel("(x-distance between turns, 0.8 recommended)"))
         layout.addLayout(hbox)
+        
+        layout.addStretch()
         
         return tab
         
@@ -1788,10 +1977,8 @@ class OptimizationTab(QWidget):
         hbox.addWidget(QLabel("Enter Coil ID to Visualize:"))
         self.coil_id_edit = QLineEdit()
         self.view_coil_btn = QPushButton("View Selected Coil")
-        self.plot_check = QCheckBox("Plot coil geometry")
         hbox.addWidget(self.coil_id_edit)
         hbox.addWidget(self.view_coil_btn)
-        hbox.addWidget(self.plot_check)
         layout.addLayout(hbox)
         
         hbox = QHBoxLayout()
@@ -1815,12 +2002,17 @@ class OptimizationTab(QWidget):
         
     def get_params(self):
         try:
+            # Get r0 from coil parameters tab
+            r0_value = float(self.findChild(QLineEdit, 'r0').text())
+            min_r0_value = float(self.findChild(QLineEdit, 'min_r0').text())
+            max_r0_value = float(self.findChild(QLineEdit, 'max_r0').text())
+            
             coil_params = {
                 'radius_y': float(self.findChild(QLineEdit, 'radius_y').text()),
                 'turns': float(self.findChild(QLineEdit, 'turns').text()),
                 'length': float(self.findChild(QLineEdit, 'length').text()),
                 'alpha': float(self.findChild(QLineEdit, 'alpha').text()),
-                'r0': float(self.r0_edit.text()),
+                'r0': r0_value,
             }
             
             coil_bounds = {
@@ -1841,19 +2033,19 @@ class OptimizationTab(QWidget):
                     'max': float(self.findChild(QLineEdit, 'max_alpha').text())
                 },
                 'r0': {
-                    'min': float(self.min_r0_edit.text()),
-                    'max': float(self.max_r0_edit.text())
+                    'min': min_r0_value,
+                    'max': max_r0_value
                 }
             }
             
             cross_params = {
-                'r0': float(self.r0_edit.text())
+                'r0': r0_value
             }
             
             cross_bounds = {
                 'r0': {
-                    'min': float(self.min_r0_edit.text()),
-                    'max': float(self.max_r0_edit.text())
+                    'min': min_r0_value,
+                    'max': max_r0_value
                 }
             }
             
@@ -2053,24 +2245,24 @@ class OptimizationTab(QWidget):
         
         self.selected_coil = selected
         
-        if self.plot_check.isChecked():
-            try:
-                params_dict = self.get_params()
-                if not params_dict:
-                    return
-                    
-                volume = params_dict['volume']
-                coil_pts = selected['coil_points']
-                surface_curves = generate_surface_curves(coil_pts, selected['cross_params'])
+        # Always plot the coil geometry
+        try:
+            params_dict = self.get_params()
+            if not params_dict:
+                return
                 
-                # Visualize in optimization tab
-                self.plot_coil_in_optimization_tab(coil_pts, surface_curves, volume)
-                
-                # Also set in field visualization tab
-                if self.field_viz_tab:
-                    self.field_viz_tab.set_coil_data(coil_pts, surface_curves)
-            except Exception as e:
-                QMessageBox.critical(self, "Visualization Error", str(e))
+            volume = params_dict['volume']
+            coil_pts = selected['coil_points']
+            surface_curves = generate_surface_curves(coil_pts, selected['cross_params'])
+            
+            # Visualize in optimization tab
+            self.plot_coil_in_optimization_tab(coil_pts, surface_curves, volume)
+            
+            # Also set in field visualization tab
+            if self.field_viz_tab:
+                self.field_viz_tab.set_coil_data(coil_pts, surface_curves)
+        except Exception as e:
+            QMessageBox.critical(self, "Visualization Error", str(e))
         
         param_info = f"Coil ID: {selected['coil_id']}\n\nCenterline Parameters:\n"
         for key, val in selected['center_params'].items():

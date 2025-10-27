@@ -100,32 +100,35 @@ def mesh_step_file(step_filename: str,
 
         gmsh.model.mesh.generate(3)
         gmsh.write(mesh_filename)
-        logging.info(f"Meshed '{step_filename}' to '{mesh_filename}' (mode={sizing_mode}, size=[{element_size}, {element_size * size_factor}])")
+        logging.debug(f"Meshed '{step_filename}' to '{mesh_filename}' (mode={sizing_mode}, size=[{element_size}, {element_size * size_factor}])")
 
     except Exception as e:
         logging.error(f"Gmsh meshing failed for file {step_filename}: {e}")
     finally:
         gmsh.finalize()
 
-def load_msh_as_pv_mesh(msh_filename: str = "generated_mesh.msh") -> pv.UnstructuredGrid:
+def load_msh_as_pv_mesh(msh_filename: str = "generated_mesh.msh"):
     """
-    Convert a Gmsh .msh file to a PyVista UnstructuredGrid.
+    Convert a Gmsh .msh file to a PyVista UnstructuredGrid or PolyData.
     
     Parameters:
         msh_filename: The filename of the .msh file.
     
     Returns:
-        A PyVista UnstructuredGrid containing the volumetric mesh.
+        A PyVista UnstructuredGrid containing the volumetric mesh, or
+        a PyVista PolyData if only surface elements are present.
     """
     try:
         mesh = meshio.read(msh_filename)
     except Exception as e:
         logging.error(f"Error reading mesh file {msh_filename}: {e}")
+        return None
 
     points = mesh.points
     cells = []
     cell_types = []
-    # Only consider volumetric cells.
+    
+    # First, try to find volumetric cells
     for cell_block in mesh.cells:
         ctype = cell_block.type
         if ctype in ["tetra", "hexahedron", "wedge", "pyramid"]:
@@ -140,12 +143,35 @@ def load_msh_as_pv_mesh(msh_filename: str = "generated_mesh.msh") -> pv.Unstruct
             elif ctype == "pyramid":
                 vtk_cell_type = 14
             cell_types.extend([vtk_cell_type] * len(cell_block.data))
-    if len(cells) == 0:
-        logging.error("No 3D volumetric cells found in the mesh.")
-    cells = np.hstack(cells)
-    cell_types = np.array(cell_types)
-    pv_grid = pv.UnstructuredGrid(cells, cell_types, points)
-    return pv_grid
+    
+    # If volumetric cells found, return UnstructuredGrid
+    if len(cells) > 0:
+        cells = np.hstack(cells)
+        cell_types = np.array(cell_types)
+        pv_grid = pv.UnstructuredGrid(cells, cell_types, points)
+        return pv_grid
+    
+    # If no volumetric cells, look for surface cells (triangles, quads)
+    logging.debug("No 3D volumetric cells found, looking for surface elements...")
+    faces = []
+    for cell_block in mesh.cells:
+        ctype = cell_block.type
+        if ctype == "triangle":
+            for tri in cell_block.data:
+                faces.append(np.concatenate(([3], tri)))
+        elif ctype == "quad":
+            for quad in cell_block.data:
+                faces.append(np.concatenate(([4], quad)))
+    
+    if len(faces) == 0:
+        logging.error("No volumetric or surface cells found in the mesh.")
+        return None
+    
+    # Create PolyData from surface elements
+    faces = np.hstack(faces)
+    pv_poly = pv.PolyData(points, faces)
+    logging.debug(f"Loaded surface mesh with {pv_poly.n_cells} cells from MSH file")
+    return pv_poly
 
 def extract_surface_mesh_from_volume(pv_grid: pv.UnstructuredGrid) -> pv.PolyData:
     """
@@ -163,9 +189,10 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
     """
     Load a surface mesh from an input CAD file. If the file is a STEP file (.stp or .step),
     it is meshed with Gmsh. If it is an STL file (.stl), it is loaded directly.
+    If it is a mesh file (.msh), it is loaded from the existing mesh.
     
     Parameters:
-        input_filename: The input file (.stp/.step or .stl).
+        input_filename: The input file (.stp/.step, .stl, or .msh).
         mesh_filename: Temporary mesh filename (used for STEP files).
         element_size: Mesh element size for STEP files.
     
@@ -176,7 +203,7 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
     if ext == ".stl":
         try:
             surf_poly = pv.read(input_filename)
-            logging.info(f"Loaded surface mesh from STL file: {input_filename}")
+            logging.debug(f"Loaded surface mesh from STL file: {input_filename}")
 
             vertices = surf_poly.points
             faces    = surf_poly.faces.reshape((-1, 4))[:, 1:]
@@ -185,16 +212,40 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
             return surf_poly
         except Exception as e:
             logging.error(f"Failed to load STL file '{input_filename}': {e}")
+    elif ext == ".msh":
+        try:
+            mesh_obj = load_msh_as_pv_mesh(input_filename)
+            if mesh_obj is None:
+                logging.error(f"Failed to load MSH file '{input_filename}'")
+                return None
+            # If it's already a PolyData (surface mesh), return it directly
+            if isinstance(mesh_obj, pv.PolyData):
+                surf_poly = mesh_obj
+            else:
+                # If it's an UnstructuredGrid (volumetric mesh), extract surface
+                surf_poly = extract_surface_mesh_from_volume(mesh_obj)
+            logging.debug(f"Loaded surface mesh from MSH file: {input_filename}")
+            return surf_poly
+        except Exception as e:
+            logging.error(f"Failed to load MSH file '{input_filename}': {e}")
     elif ext in [".stp", ".step"]:
         mesh_step_file(input_filename, mesh_filename, element_size, size_factor, sizing_mode)
         try:
-            pv_grid = load_msh_as_pv_mesh(mesh_filename)
-            surf_poly = extract_surface_mesh_from_volume(pv_grid)
+            mesh_obj = load_msh_as_pv_mesh(mesh_filename)
+            if mesh_obj is None:
+                logging.error(f"Failed to load mesh from '{mesh_filename}'")
+                return None
+            # If it's already a PolyData (surface mesh), return it directly
+            if isinstance(mesh_obj, pv.PolyData):
+                surf_poly = mesh_obj
+            else:
+                # If it's an UnstructuredGrid (volumetric mesh), extract surface
+                surf_poly = extract_surface_mesh_from_volume(mesh_obj)
             return surf_poly
         except Exception as e:
             logging.error(f"Failed to load mesh from '{mesh_filename}': {e}")
     else:
-        logging.error("Unsupported file format. Please use a .stp/.step or .stl file.")
+        logging.error("Unsupported file format. Please use a .stp/.step, .stl, or .msh file.")
 
 def write_msh_direct_from_stl(fname, vertices, faces):
     with open(fname, "w") as f:
@@ -262,10 +313,10 @@ def compute_centerline_3d_mce(surf_poly: pv.PolyData, loopA: pv.PolyData, loopB:
     loopB_plane_centroid, loopB_plane_normal = compute_best_fit_plane(loopB.points)
 
     endA_vertex_indices = select_vertices_near_plane(surf_poly, loopA_plane_centroid, loopA_plane_normal, TOL)
-    logging.info(f"Found {len(endA_vertex_indices)} on end A out of {len(vertices)} vertices in the mesh based on plane tolerance.")
+    logging.debug(f"Found {len(endA_vertex_indices)} on end A out of {len(vertices)} vertices in the mesh based on plane tolerance.")
 
     endB_vertex_indices = select_vertices_near_plane(surf_poly, loopB_plane_centroid, loopB_plane_normal, TOL)
-    logging.info(f"Found {len(endB_vertex_indices)} on end B out of {len(vertices)} vertices in the mesh based on plane tolerance.")
+    logging.debug(f"Found {len(endB_vertex_indices)} on end B out of {len(vertices)} vertices in the mesh based on plane tolerance.")
 
     all_vertex_indices = set(range(len(vertices)))
 
@@ -275,7 +326,7 @@ def compute_centerline_3d_mce(surf_poly: pv.PolyData, loopA: pv.PolyData, loopB:
     # The active vertex indices are those not in the inactive set.
     active_vertex_indices = all_vertex_indices - inactive_vertex_indices
 
-    logging.info(f"Active vertex count: {len(active_vertex_indices)} out of {len(vertices)} total vertices.")
+    logging.debug(f"Active vertex count: {len(active_vertex_indices)} out of {len(vertices)} total vertices.")
 
     # Now, build the active face set.
     # Each face is given by an array of vertex indices (from pv_faces).
@@ -285,7 +336,7 @@ def compute_centerline_3d_mce(surf_poly: pv.PolyData, loopA: pv.PolyData, loopB:
         if any(v in active_vertex_indices for v in face):
             active_face_indices.add(f_idx)
 
-    logging.info(f"Active face count: {len(active_face_indices)} out of {len(pv_faces)} total faces.")
+    logging.debug(f"Active face count: {len(active_face_indices)} out of {len(pv_faces)} total faces.")
 
     edge_to_faces = defaultdict(list)
     for f_idx, tri in enumerate(faces):
@@ -470,7 +521,8 @@ def refine_loop(loop_poly: pv.PolyData, n_points: int = 200, smoothing: float = 
     try:
         tck, _ = splprep([pts[:, 0], pts[:, 1], pts[:, 2]], u=u, s=smoothing, k=spline_degree, per=True)
     except Exception as e:
-        logging.error(f"Refining loop failed during splprep: {e}")
+        # Reduce noise - this is often expected for complex loops
+        logging.debug(f"Refining loop failed during splprep: {e}")
         return pts
     dense_n = 1000
     u_dense = np.linspace(0, 1, dense_n)
@@ -782,7 +834,7 @@ def smooth_surface_curve(curve: np.ndarray, s: float = 0.1, k: int = 3, n_interp
         smoothed_curve[-1] = curve[-1]
         return smoothed_curve
     except Exception as e:
-        logging.error(f"Surface curve smoothing failed: {e}")
+        logging.debug(f"Surface curve smoothing failed: {e}")
         return curve.copy()
 
 
