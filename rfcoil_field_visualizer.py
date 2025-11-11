@@ -320,52 +320,353 @@ class MagneticFieldVisualizer(QWidget):
         self.last_computed_region_type = None
         self.region_counts = {"Volume": 0, "Plane": 0, "Line": 0}
         self.last_region_points_by_type = {"Volume": None, "Plane": None, "Line": None}
+        self.current_view_mode = None  # Track current view: 'region', 'field', or 'basic'
         
         self.main_layout = QHBoxLayout(self)
         self.setLayout(self.main_layout)
         
-        self.controls_widget = QWidget()
-        self.controls_layout = QVBoxLayout(self.controls_widget)
+        # Left panel with fixed width
+        left_panel = QWidget()
+        left_panel.setMinimumWidth(450)
+        left_panel.setMaximumWidth(450)
+        self.controls_layout = QVBoxLayout(left_panel)
         
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(self.controls_widget)
-        self.main_layout.addWidget(scroll_area, stretch=0)
+        # Create tabs for better organization
+        self.control_tabs = QTabWidget()
+        
+        # Tab 1: Region Setup (with Visualize button)
+        region_tab = self.create_region_tab()
+        self.control_tabs.addTab(region_tab, "Region Setup")
+        
+        # Tab 2: Field Computation (with Compute button)
+        field_tab = self.create_field_computation_tab()
+        self.control_tabs.addTab(field_tab, "Field Computation")
+        
+        self.controls_layout.addWidget(self.control_tabs)
+        
+        # Visualization controls - always visible at bottom
+        self.controls_layout.addWidget(QLabel("<b>Visualization Controls:</b>"))
+        
+        # Field display mode
+        display_layout = QHBoxLayout()
+        display_layout.addWidget(QLabel("Display Mode:"))
+        self.field_type_dropdown = QComboBox()
+        self.field_type_dropdown.addItems([
+            "Vector- Magnitude (Color), Direction(Arrow)",
+            "Vector, Magnitude & Direction",
+            "Magnitude",
+            "Bx (Color Only)",
+            "Bx (Arrow)",
+            "By (Color Only)",
+            "By (Arrow)",
+            "Bz (Color Only)",
+            "Bz (Arrow)"
+        ])
+        self.field_type_dropdown.currentIndexChanged.connect(self.plot_magnetic_field)
+        display_layout.addWidget(self.field_type_dropdown)
+        self.controls_layout.addLayout(display_layout)
+        
+        scale_layout = QHBoxLayout()
+        scale_layout.addWidget(QLabel("Vector Scale:"))
+        self.vector_scale_input = QLineEdit("1.0")
+        self.vector_scale_input.setFixedWidth(60)
+        self.vector_scale_input.editingFinished.connect(self.plot_magnetic_field)
+        scale_layout.addWidget(self.vector_scale_input)
+        scale_layout.addStretch()
+        self.controls_layout.addLayout(scale_layout)
+        
+        # Visibility checkboxes in compact grid
+        vis_grid = QGridLayout()
+        vis_grid.setHorizontalSpacing(5)
+        vis_grid.setVerticalSpacing(3)
+        
+        self.hide_centerline_checkbox = QCheckBox("Hide Centerline")
+        self.hide_centerline_checkbox.toggled.connect(self.refresh_current_view)
+        vis_grid.addWidget(self.hide_centerline_checkbox, 0, 0)
+        
+        self.hide_surface_curves_checkbox = QCheckBox("Hide Surf. Curves")
+        self.hide_surface_curves_checkbox.toggled.connect(self.refresh_current_view)
+        vis_grid.addWidget(self.hide_surface_curves_checkbox, 0, 1)
+        
+        self.hide_coil_geometry_checkbox = QCheckBox("Hide Geometry")
+        self.hide_coil_geometry_checkbox.toggled.connect(self.refresh_current_view)
+        vis_grid.addWidget(self.hide_coil_geometry_checkbox, 1, 0)
+        
+        self.hide_region_checkbox = QCheckBox("Hide Region")
+        self.hide_region_checkbox.toggled.connect(self.refresh_current_view)
+        vis_grid.addWidget(self.hide_region_checkbox, 1, 1)
+        
+        self.hide_grid_checkbox = QCheckBox("Hide Grid")
+        self.hide_grid_checkbox.toggled.connect(self.refresh_current_view)
+        vis_grid.addWidget(self.hide_grid_checkbox, 2, 0)
+        
+        self.hide_axes_checkbox = QCheckBox("Hide Axes")
+        self.hide_axes_checkbox.toggled.connect(self.refresh_current_view)
+        vis_grid.addWidget(self.hide_axes_checkbox, 2, 1)
+        
+        self.controls_layout.addLayout(vis_grid)
+        
+        # Grid settings
+        grid_layout = QHBoxLayout()
+        grid_layout.addWidget(QLabel("Grid:"))
+        self.grid_spacing_input = QLineEdit("1")
+        self.grid_spacing_input.setFixedWidth(40)
+        self.grid_spacing_input.editingFinished.connect(self.refresh_current_view)
+        grid_layout.addWidget(self.grid_spacing_input)
+        grid_layout.addWidget(QLabel("Size:"))
+        self.grid_side_length_input = QLineEdit("20")
+        self.grid_side_length_input.setFixedWidth(40)
+        self.grid_side_length_input.editingFinished.connect(self.refresh_current_view)
+        grid_layout.addWidget(self.grid_side_length_input)
+        grid_layout.addStretch()
+        self.controls_layout.addLayout(grid_layout)
+        
+        self.controls_layout.addStretch()
+        
+        self.main_layout.addWidget(left_panel)
         
         self.vtk_widget = QtInteractor(self)
         self.vtk_widget.setMinimumWidth(600)
         self.main_layout.addWidget(self.vtk_widget, stretch=1)
         self.plotter = self.vtk_widget
         
-        self.create_region_type_selector()
-        self.create_region_inputs()
-        self.create_exclusion_controls()
-        self.create_visualization_options()
-        self.create_field_visualization_options()
-        self.create_source_controls()
-        self.create_compute_export_controls()
-        
-        self.field_type_dropdown.currentIndexChanged.connect(self.plot_magnetic_field)
-        self.vector_scale_input.editingFinished.connect(self.plot_magnetic_field)
-        
-        # Connect all visibility checkboxes to refresh the current view
-        self.hide_centerline_checkbox.toggled.connect(self.refresh_current_view)
-        self.hide_surface_curves_checkbox.toggled.connect(self.refresh_current_view)
-        self.hide_coil_geometry_checkbox.toggled.connect(self.refresh_current_view)
-        self.hide_region_checkbox.toggled.connect(self.refresh_current_view)
-        self.hide_grid_checkbox.toggled.connect(self.refresh_current_view)
-        self.hide_axes_checkbox.toggled.connect(self.refresh_current_view)
-        self.exclude_interior_checkbox.toggled.connect(self.refresh_current_view)
-        self.exclusion_distance_input.editingFinished.connect(self.refresh_current_view)
-        
-        # Connect grid settings to refresh view
-        self.grid_spacing_input.editingFinished.connect(self.refresh_current_view)
-        self.grid_side_length_input.editingFinished.connect(self.refresh_current_view)
-        
-        # Connect region dropdown to refresh when changed (but only if there's something to refresh)
-        self.region_dropdown.currentIndexChanged.connect(self.on_region_type_changed)
+        # Connect signals after all widgets are created
+        self.setup_signal_connections()
         
         self.update_inputs()
+    
+    def create_region_tab(self) -> QWidget:
+        """Create the Region Setup tab with region type and parameters"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(10)
+        
+        # Region type selector
+        layout.addWidget(QLabel("<b>Region Type:</b>"))
+        self.region_dropdown = QComboBox()
+        self.region_dropdown.addItems(["Volume", "Plane", "Line"])
+        self.region_dropdown.currentIndexChanged.connect(self.on_region_type_changed)
+        layout.addWidget(self.region_dropdown)
+        
+        layout.addSpacing(10)
+        
+        # Volume region parameters
+        self.volume_group = QGroupBox("Volume Region Parameters")
+        vol_layout = QVBoxLayout()
+        vol_layout.setSpacing(5)
+        
+        vol_grid = QGridLayout()
+        vol_grid.setHorizontalSpacing(10)
+        vol_grid.setVerticalSpacing(5)
+        
+        vol_grid.addWidget(QLabel("X Min:"), 0, 0)
+        self.xmin_input = QLineEdit("-5")
+        self.xmin_input.setFixedWidth(60)
+        vol_grid.addWidget(self.xmin_input, 0, 1)
+        vol_grid.addWidget(QLabel("X Max:"), 0, 2)
+        self.xmax_input = QLineEdit("17")
+        self.xmax_input.setFixedWidth(60)
+        vol_grid.addWidget(self.xmax_input, 0, 3)
+        
+        vol_grid.addWidget(QLabel("Y Min:"), 1, 0)
+        self.ymin_input = QLineEdit("0")
+        self.ymin_input.setFixedWidth(60)
+        vol_grid.addWidget(self.ymin_input, 1, 1)
+        vol_grid.addWidget(QLabel("Y Max:"), 1, 2)
+        self.ymax_input = QLineEdit("0")
+        self.ymax_input.setFixedWidth(60)
+        vol_grid.addWidget(self.ymax_input, 1, 3)
+        
+        vol_grid.addWidget(QLabel("Z Min:"), 2, 0)
+        self.zmin_input = QLineEdit("-5")
+        self.zmin_input.setFixedWidth(60)
+        vol_grid.addWidget(self.zmin_input, 2, 1)
+        vol_grid.addWidget(QLabel("Z Max:"), 2, 2)
+        self.zmax_input = QLineEdit("17")
+        self.zmax_input.setFixedWidth(60)
+        vol_grid.addWidget(self.zmax_input, 2, 3)
+        
+        vol_layout.addLayout(vol_grid)
+        
+        spacing_layout = QHBoxLayout()
+        spacing_layout.addWidget(QLabel("Spacing:"))
+        self.points_spacing_input = QLineEdit("0.5")
+        self.points_spacing_input.setFixedWidth(60)
+        spacing_layout.addWidget(self.points_spacing_input)
+        spacing_layout.addStretch()
+        vol_layout.addLayout(spacing_layout)
+        
+        self.volume_group.setLayout(vol_layout)
+        layout.addWidget(self.volume_group)
+        
+        # Plane region parameters
+        self.plane_group = QGroupBox("Plane Region Parameters")
+        plane_layout = QVBoxLayout()
+        plane_layout.setSpacing(5)
+        
+        self.plane_origin_input = self.create_compact_input("Origin (x,y,z):", "0,0,0", plane_layout)
+        self.plane_normal_input = self.create_compact_input("Normal (x,y,z):", "0,0,1", plane_layout)
+        
+        dims_layout = QHBoxLayout()
+        dims_layout.addWidget(QLabel("Length:"))
+        self.plane_length_input = QLineEdit("10")
+        self.plane_length_input.setFixedWidth(50)
+        dims_layout.addWidget(self.plane_length_input)
+        dims_layout.addWidget(QLabel("Width:"))
+        self.plane_width_input = QLineEdit("10")
+        self.plane_width_input.setFixedWidth(50)
+        dims_layout.addWidget(self.plane_width_input)
+        dims_layout.addStretch()
+        plane_layout.addLayout(dims_layout)
+        
+        self.plane_points_spacing_input = self.create_compact_input("Spacing:", "0.5", plane_layout)
+        
+        self.plane_group.setLayout(plane_layout)
+        layout.addWidget(self.plane_group)
+        
+        # Line region parameters
+        self.line_group = QGroupBox("Line Region Parameters")
+        line_layout = QVBoxLayout()
+        line_layout.setSpacing(5)
+        
+        self.line_start_input = self.create_compact_input("Start (x,y,z):", "0,0,0", line_layout)
+        self.line_end_input = self.create_compact_input("End (x,y,z):", "1,1,1", line_layout)
+        self.line_points_input = self.create_compact_input("Number of Points:", "10", line_layout)
+        
+        self.line_group.setLayout(line_layout)
+        layout.addWidget(self.line_group)
+        
+        layout.addSpacing(10)
+        
+        # Exclusion controls
+        layout.addWidget(QLabel("<b>Point Filtering:</b>"))
+        self.exclude_interior_checkbox = QCheckBox("Exclude points inside surface mesh")
+        self.exclude_interior_checkbox.setChecked(True)
+        layout.addWidget(self.exclude_interior_checkbox)
+        self.exclusion_distance_input = self.create_compact_input("Exclusion distance:", "0.25", layout)
+        
+        layout.addStretch()
+        
+        # Visualize Region button at bottom
+        self.visualize_region_button = QPushButton("Visualize Region")
+        self.visualize_region_button.clicked.connect(self.visualize_region)
+        self.visualize_region_button.setToolTip("Preview the computation region")
+        self.visualize_region_button.setStyleSheet("font-weight: bold; padding: 8px;")
+        layout.addWidget(self.visualize_region_button)
+        
+        return tab
+    
+    def create_field_computation_tab(self) -> QWidget:
+        """Create the Field Computation tab with field settings"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(10)
+        
+        # Field type selection
+        layout.addWidget(QLabel("<b>Field Type:</b>"))
+        self.field_compute_dropdown = QComboBox()
+        self.field_compute_dropdown.addItems(["B-field (magnetic)", "E-field (electric)"])
+        self.field_compute_dropdown.currentIndexChanged.connect(self.on_field_type_changed)
+        layout.addWidget(self.field_compute_dropdown)
+        
+        # Frequency (for E-field)
+        freq_layout = QHBoxLayout()
+        freq_layout.addWidget(QLabel("Frequency (MHz):"))
+        self.freq_input = QLineEdit("400")
+        self.freq_input.setFixedWidth(80)
+        self.freq_input.setEnabled(False)
+        freq_layout.addWidget(self.freq_input)
+        freq_layout.addStretch()
+        layout.addLayout(freq_layout)
+        
+        layout.addSpacing(10)
+        
+        # Current source selection
+        layout.addWidget(QLabel("<b>Current Path:</b>"))
+        source_layout = QHBoxLayout()
+        self.surface_curves_radio = QRadioButton("Surface Curves")
+        self.centerline_radio = QRadioButton("Centerline")
+        self.surface_curves_radio.setChecked(True)
+        source_layout.addWidget(self.surface_curves_radio)
+        source_layout.addWidget(self.centerline_radio)
+        source_layout.addStretch()
+        layout.addLayout(source_layout)
+        
+        current_layout = QHBoxLayout()
+        current_layout.addWidget(QLabel("Coil Current (A):"))
+        self.current_input = QLineEdit("1.0")
+        self.current_input.setFixedWidth(80)
+        current_layout.addWidget(self.current_input)
+        current_layout.addStretch()
+        layout.addLayout(current_layout)
+        
+        layout.addSpacing(10)
+        
+        # Inductance calculation
+        layout.addWidget(QLabel("<b>Inductance Calculation:</b>"))
+        self.inductance_button = QPushButton("Compute Inductance from B-Field")
+        self.inductance_button.clicked.connect(self.compute_inductance)
+        layout.addWidget(self.inductance_button)
+        
+        note_lbl = QLabel("<i>Volume must fully enclose the coil</i>")
+        note_lbl.setStyleSheet("font-size: 9px; color: gray;")
+        layout.addWidget(note_lbl)
+        
+        ind_layout = QHBoxLayout()
+        ind_layout.addWidget(QLabel("Inductance:"))
+        self.inductance_value_lbl = QLabel("—")
+        ind_layout.addWidget(self.inductance_value_lbl)
+        ind_layout.addStretch()
+        layout.addLayout(ind_layout)
+        
+        layout.addSpacing(10)
+        
+        # Export settings
+        layout.addWidget(QLabel("<b>Export Settings:</b>"))
+        export_layout = QHBoxLayout()
+        export_layout.addWidget(QLabel("Base Name:"))
+        self.export_basename_input = QLineEdit("field_export")
+        self.export_basename_input.setFixedWidth(150)
+        export_layout.addWidget(self.export_basename_input)
+        export_layout.addStretch()
+        layout.addLayout(export_layout)
+        
+        layout.addStretch()
+        
+        # Action buttons at bottom
+        self.compute_field_button = QPushButton("Compute Field")
+        self.compute_field_button.clicked.connect(self.compute_field)
+        self.compute_field_button.setToolTip("Calculate electromagnetic field in the specified region")
+        layout.addWidget(self.compute_field_button)
+        
+        self.export_button = QPushButton("Export Data")
+        self.export_button.clicked.connect(self.export_data)
+        self.export_button.setStyleSheet("font-weight: bold; padding: 8px;")
+        self.export_button.setToolTip("Export computed field data to CSV file")
+        layout.addWidget(self.export_button)
+        
+        return tab
+    
+    def create_compact_input(self, label_text: str, default_value: str, parent_layout) -> QLineEdit:
+        """Create a compact horizontal input field"""
+        h_layout = QHBoxLayout()
+        h_layout.addWidget(QLabel(label_text))
+        input_field = QLineEdit(default_value)
+        input_field.setFixedWidth(120)
+        h_layout.addWidget(input_field)
+        h_layout.addStretch()
+        parent_layout.addLayout(h_layout)
+        return input_field
+    
+    def on_field_type_changed(self):
+        """Enable/disable frequency input based on field type"""
+        is_efield = self.field_compute_dropdown.currentText() == "E-field (electric)"
+        self.freq_input.setEnabled(is_efield)
+    
+    def setup_signal_connections(self):
+        """Setup all signal connections after widgets are created"""
+        self.exclude_interior_checkbox.toggled.connect(self.refresh_current_view)
+        self.exclusion_distance_input.editingFinished.connect(self.refresh_current_view)
 
     def set_coil_data(self, centerline: np.ndarray, surface_curves: list, surface_mesh=None):
         """Set the coil data for visualization and computation"""
@@ -389,150 +690,6 @@ class MagneticFieldVisualizer(QWidget):
             self.main_layout.addWidget(self.vtk_widget, stretch=1)
             self.plotter = self.vtk_widget
 
-    def create_region_type_selector(self) -> None:
-        self.controls_layout.addWidget(QLabel("Select Computation Region Type:"))
-        self.region_dropdown = QComboBox()
-        self.region_dropdown.addItems(["Volume", "Plane", "Line"])
-        self.controls_layout.addWidget(self.region_dropdown)
-
-    def create_region_inputs(self) -> None:
-        self.volume_group = QGroupBox("Volume Region Limits")
-        vol_layout = QVBoxLayout()
-        self.xmin_input = self.create_labeled_input("Xmin:", "-5", vol_layout)
-        self.xmax_input = self.create_labeled_input("Xmax:", "17", vol_layout)
-        self.ymin_input = self.create_labeled_input("Ymin:", "0", vol_layout)
-        self.ymax_input = self.create_labeled_input("Ymax:", "0", vol_layout)
-        self.zmin_input = self.create_labeled_input("Zmin:", "-5", vol_layout)
-        self.zmax_input = self.create_labeled_input("Zmax:", "17", vol_layout)
-        self.points_spacing_input = self.create_labeled_input("Spacing:", "0.5", vol_layout)
-        self.volume_group.setLayout(vol_layout)
-        self.controls_layout.addWidget(self.volume_group)
-
-        self.plane_group = QGroupBox("Plane Region Limits")
-        plane_layout = QVBoxLayout()
-        self.plane_origin_input = self.create_labeled_input("Origin (x,y,z):", "0,0,0", plane_layout)
-        self.plane_normal_input = self.create_labeled_input("Normal (x,y,z):", "0,0,1", plane_layout)
-        self.plane_length_input = self.create_labeled_input("Length:", "10", plane_layout)
-        self.plane_width_input = self.create_labeled_input("Width:", "10", plane_layout)
-        self.plane_points_spacing_input = self.create_labeled_input("Spacing:", "0.5", plane_layout)
-        self.plane_group.setLayout(plane_layout)
-        self.controls_layout.addWidget(self.plane_group)
-
-        self.line_group = QGroupBox("Line Region Limits")
-        line_layout = QVBoxLayout()
-        self.line_start_input = self.create_labeled_input("Start (x,y,z):", "0,0,0", line_layout)
-        self.line_end_input = self.create_labeled_input("End (x,y,z):", "1,1,1", line_layout)
-        self.line_points_input = self.create_labeled_input("Number of Points:", "10", line_layout)
-        self.line_group.setLayout(line_layout)
-        self.controls_layout.addWidget(self.line_group)
-
-    def create_exclusion_controls(self) -> None:
-        self.exclude_interior_checkbox = QCheckBox("Exclude points inside surface mesh")
-        self.exclude_interior_checkbox.setChecked(True)
-        self.controls_layout.addWidget(self.exclude_interior_checkbox)
-        self.exclusion_distance_input = self.create_labeled_input("Exclusion distance:", "0.25", self.controls_layout, inline=True)
-
-    def create_visualization_options(self) -> None:
-        self.controls_layout.addWidget(QLabel("Visualization Options:"))
-        hide_group1 = QHBoxLayout()
-        self.hide_centerline_checkbox = QCheckBox("Hide centerline")
-        self.hide_surface_curves_checkbox = QCheckBox("Hide surface curves")
-        self.hide_coil_geometry_checkbox = QCheckBox("Hide coil geometry")
-        hide_group1.addWidget(self.hide_centerline_checkbox)
-        hide_group1.addWidget(self.hide_surface_curves_checkbox)
-        hide_group1.addWidget(self.hide_coil_geometry_checkbox)
-        self.controls_layout.addLayout(hide_group1)
-        hide_group2 = QHBoxLayout()
-        self.hide_region_checkbox = QCheckBox("Hide region points")
-        self.hide_grid_checkbox = QCheckBox("Hide grid points")
-        self.hide_axes_checkbox = QCheckBox("Hide coordinate axes")
-        hide_group2.addWidget(self.hide_region_checkbox)
-        hide_group2.addWidget(self.hide_grid_checkbox)
-        hide_group2.addWidget(self.hide_axes_checkbox)
-        self.controls_layout.addLayout(hide_group2)
-        self.grid_spacing_input = self.create_labeled_input("Grid Spacing:", "1", self.controls_layout, inline=True)
-        self.grid_side_length_input = self.create_labeled_input("Grid Cube Side Length:", "20", self.controls_layout, inline=True)
-        self.visualize_region_button = QPushButton("Visualize Region")
-        self.visualize_region_button.clicked.connect(self.visualize_region)
-        self.controls_layout.addWidget(self.visualize_region_button)
-
-    def create_field_visualization_options(self) -> None:
-        self.controls_layout.addWidget(QLabel("Magnetic Field Visualization Options:"))
-        self.field_type_dropdown = QComboBox()
-        self.field_type_dropdown.addItems([
-            "Vector- Magnitude (Color), Direction(Arrow)",
-            "Vector, Magnitude & Direction",
-            "Magnitude",
-            "Bx (Color Only)",
-            "Bx (Arrow)",
-            "By (Color Only)",
-            "By (Arrow)",
-            "Bz (Color Only)",
-            "Bz (Arrow)"
-        ])
-        self.controls_layout.addWidget(self.field_type_dropdown)
-        self.vector_scale_input = self.create_labeled_input("Vector Scale:", "1.0", self.controls_layout, inline=True)
-
-    def create_source_controls(self) -> None:
-        self.controls_layout.addWidget(QLabel("Select path for current:"))
-        source_layout = QHBoxLayout()
-        self.surface_curves_radio = QRadioButton("Surface Curves")
-        self.centerline_radio = QRadioButton("Centerline")
-        self.surface_curves_radio.setChecked(True)
-        source_layout.addWidget(self.surface_curves_radio)
-        source_layout.addWidget(self.centerline_radio)
-        self.controls_layout.addLayout(source_layout)
-        self.current_input = self.create_labeled_input("Coil Current (A):", "1.0", self.controls_layout, inline=True)
-
-    def create_compute_export_controls(self) -> None:
-        self.field_type_lbl = QLabel("Select field type to compute:")
-        self.field_compute_dropdown = QComboBox()
-        self.field_compute_dropdown.addItems(["B-field (magnetic)", "E-field (electric)"])
-        self.controls_layout.addWidget(self.field_type_lbl)
-        self.controls_layout.addWidget(self.field_compute_dropdown)
-        
-        freq_box = QHBoxLayout()
-        freq_box.addWidget(QLabel("Frequency (MHz):"))
-        self.freq_input = QLineEdit("400")
-        self.freq_input.setFixedWidth(60)
-        self.freq_input.setEnabled(False)  # Greyed out by default
-        freq_box.addWidget(self.freq_input)
-        self.controls_layout.addLayout(freq_box)
-        self.compute_field_button = QPushButton("Compute Field")
-        self.compute_field_button.clicked.connect(self.compute_field)
-        self.controls_layout.addWidget(self.compute_field_button)
-        self.inductance_button = QPushButton("Compute inductance from calculated B-Field")
-        self.inductance_button.clicked.connect(self.compute_inductance)
-        self.controls_layout.addWidget(self.inductance_button)
-        note_lbl = QLabel("<i>Ensure the specified volume fully encloses the coil</i>")
-        self.controls_layout.addWidget(note_lbl)
-        ind_layout = QHBoxLayout()
-        ind_layout.addWidget(QLabel("Calculated static inductance:"))
-        self.inductance_value_lbl = QLabel("")
-        ind_layout.addWidget(self.inductance_value_lbl, stretch=1)
-        self.controls_layout.addLayout(ind_layout)
-        self.export_basename_input = self.create_labeled_input("Export CSV Base Name:", "field_export", self.controls_layout, inline=True)
-        self.export_button = QPushButton("Export Data")
-        self.export_button.clicked.connect(self.export_data)
-        self.controls_layout.addWidget(self.export_button)
-
-    def create_labeled_input(self, label_text: str, default_value: str, parent_layout, inline: bool = False) -> QLineEdit:
-        if inline:
-            layout = parent_layout if isinstance(parent_layout, QHBoxLayout) else QHBoxLayout()
-        else:
-            layout = QHBoxLayout()
-        label = QLabel(label_text)
-        input_field = QLineEdit()
-        input_field.setText(default_value)
-        layout.addWidget(label)
-        layout.addWidget(input_field)
-        if not inline:
-            parent_layout.addLayout(layout)
-        else:
-            if not isinstance(parent_layout, QHBoxLayout):
-                parent_layout.addLayout(layout)
-        return input_field
-
     def update_inputs(self) -> None:
         region_type = self.region_dropdown.currentText()
         self.volume_group.setVisible(region_type == "Volume")
@@ -548,15 +705,15 @@ class MagneticFieldVisualizer(QWidget):
 
     def refresh_current_view(self) -> None:
         """Refresh the current visualization based on what was last displayed"""
-        # Determine what should be refreshed based on current state
-        if self.last_B is not None and self.last_region_points is not None:
-            # If magnetic field was computed and displayed, refresh that
+        # Respect the current view mode - don't automatically switch back to field view
+        if self.current_view_mode == 'field' and self.last_B is not None:
+            # Only refresh field if we're explicitly in field view mode
             self.plot_magnetic_field()
-        elif self.last_region_points is not None:
-            # If only region visualization was shown, refresh that
+        elif self.current_view_mode == 'region':
+            # Refresh region visualization
             self.visualize_region()
         else:
-            # If nothing specific was shown, refresh basic coil visualization
+            # Default: refresh basic coil visualization
             self.refresh_basic_visualization()
 
     def refresh_basic_visualization(self) -> None:
@@ -735,6 +892,7 @@ class MagneticFieldVisualizer(QWidget):
 
     def visualize_region(self) -> None:
         logger.debug("Entering visualize_region()")
+        self.current_view_mode = 'region'  # Set mode to region view
         self.ensure_plotter()
         region_type = self.region_dropdown.currentText()
         self.plotter.clear()
@@ -929,6 +1087,7 @@ class MagneticFieldVisualizer(QWidget):
             logger.info("No computed B-field to plot yet.")
             return
 
+        self.current_view_mode = 'field'  # Set mode to field view
         self.ensure_plotter()
         B = self.last_B
         region_points = self.last_region_points
@@ -1083,6 +1242,7 @@ class MagneticFieldVisualizer(QWidget):
             logger.info("No E-field to plot yet.")
             return
 
+        self.current_view_mode = 'field'  # Set mode to field view
         self.ensure_plotter()
         E_vec = self.last_E
         Emag = np.linalg.norm(E_vec, axis=1)
@@ -1254,162 +1414,201 @@ class MeshProcessorTab(QWidget):
     def init_ui(self):
         from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QRadioButton, QButtonGroup, QComboBox, QDoubleSpinBox, QSpinBox, QFileDialog, QMessageBox
         main_layout = QHBoxLayout(self)
-        control_layout = QVBoxLayout()
-
-        # File type radio buttons
-        self.stl_radio = QRadioButton("Accept STL Files")
+        
+        # Create a container for all controls (no scroll area)
+        control_container = QWidget()
+        control_container.setMinimumWidth(500)
+        control_container.setMaximumWidth(500)
+        control_main_layout = QVBoxLayout(control_container)
+        
+        # File type radio buttons (full width at top)
+        control_main_layout.addWidget(QLabel("<b>File Type Filter:</b>"))
+        filetype_layout = QHBoxLayout()
+        self.stl_radio = QRadioButton("STL")
         self.stl_radio.setChecked(True)
         self.stl_radio.toggled.connect(self.set_accept_stl)
-        self.stp_radio = QRadioButton("Accept STP Files")
+        self.stp_radio = QRadioButton("STP")
         self.stp_radio.toggled.connect(self.set_accept_stp)
-        self.msh_radio = QRadioButton("Accept MSH Files")
+        self.msh_radio = QRadioButton("MSH")
         self.msh_radio.toggled.connect(self.set_accept_msh)
         filetype_group = QButtonGroup()
         filetype_group.addButton(self.stl_radio)
         filetype_group.addButton(self.stp_radio)
         filetype_group.addButton(self.msh_radio)
-        control_layout.addWidget(QLabel("File Type Filter:"))
-        control_layout.addWidget(self.stl_radio)
-        control_layout.addWidget(self.stp_radio)
-        control_layout.addWidget(self.msh_radio)
+        filetype_layout.addWidget(self.stl_radio)
+        filetype_layout.addWidget(self.stp_radio)
+        filetype_layout.addWidget(self.msh_radio)
+        filetype_layout.addStretch()
+        control_main_layout.addLayout(filetype_layout)
 
+        # Load file button and status (full width)
         self.btn_load_file = QPushButton("Load File")
         self.btn_load_file.clicked.connect(self.load_file)
-        self.btn_load_file.setToolTip("Load a .stp or .stl file")
-        control_layout.addWidget(self.btn_load_file)
+        self.btn_load_file.setToolTip("Load a .stp, .stl, or .msh file")
+        control_main_layout.addWidget(self.btn_load_file)
+        
         self.loaded_file = QLabel("No file loaded")
-        self.loaded_file.setStyleSheet("color: green;")
-        control_layout.addWidget(self.loaded_file)
+        self.loaded_file.setStyleSheet("color: green; font-size: 10px;")
+        control_main_layout.addWidget(self.loaded_file)
 
-        self.btn_process = QPushButton("Generate Centerline")
-        self.btn_process.clicked.connect(self.generate_centerline)
-        self.btn_process.setEnabled(False)
-        self.btn_process.setToolTip("Generate a centerline for loaded coil")
-        control_layout.addWidget(self.btn_process)
-
-        self.btn_second_process = QPushButton("Generate Surface Curves")
-        self.btn_second_process.clicked.connect(self.generate_surface_curves)
-        self.btn_second_process.setEnabled(False)
-        self.btn_second_process.setToolTip("Generate surface curves for centerline")
-        control_layout.addWidget(self.btn_second_process)
-
-        self.btn_clear = QPushButton("Clear Plot")
-        self.btn_clear.clicked.connect(self.clear_plot)
-        self.btn_clear.setToolTip("Clears the current plot")
-        control_layout.addWidget(self.btn_clear)
-
-        self.status_label = QLabel("Status: Ready")
-        self.status_label.setStyleSheet("color: red;")
-        control_layout.addWidget(self.status_label)
-
+        # Two-column grid for parameters
+        control_main_layout.addWidget(QLabel("<b>Parameters:</b>"))
+        params_grid = QGridLayout()
+        params_grid.setHorizontalSpacing(10)
+        params_grid.setVerticalSpacing(5)
+        
+        row = 0
+        # Column 1 (left)
         # Sizing mode dropdown for STP
+        params_grid.addWidget(QLabel("Sizing Mode:"), row, 0)
         self.stp_sizing_dropdown = QComboBox()
-        self.stp_sizing_dropdown.addItems(["curvature", "uniform"])
+        self.stp_sizing_dropdown.addItems(["uniform", "curvature"])
         self.stp_sizing_dropdown.setCurrentText("uniform")
         self.stp_sizing_dropdown.currentTextChanged.connect(lambda val: setattr(self, 'sizing_mode', val))
-        self.stp_sizing_dropdown.setToolTip("Choose between Uniform and Curvature Modes for STP Files")
+        self.stp_sizing_dropdown.setToolTip("Mesh sizing for STP files")
         self.stp_sizing_dropdown.setEnabled(False)
-        control_layout.addWidget(QLabel("Sizing Mode:"))
-        control_layout.addWidget(self.stp_sizing_dropdown)
-
-        # Element size input
+        params_grid.addWidget(self.stp_sizing_dropdown, row, 1)
+        
+        # Column 2 (right)
+        params_grid.addWidget(QLabel("Element Size:"), row, 2)
         self.element_size_input = QDoubleSpinBox()
         self.element_size_input.setRange(0.01, 10.0)
         self.element_size_input.setSingleStep(0.01)
         self.element_size_input.setValue(0.15)
         self.element_size_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Element Size"))
-        control_layout.addWidget(self.element_size_input)
-
+        params_grid.addWidget(self.element_size_input, row, 3)
+        
+        row += 1
+        # Max Element Size Factor
+        params_grid.addWidget(QLabel("Max Size Factor:"), row, 0)
         self.max_element_size_factor_input = QDoubleSpinBox()
         self.max_element_size_factor_input.setRange(1.0, 5.0)
         self.max_element_size_factor_input.setSingleStep(0.01)
         self.max_element_size_factor_input.setValue(2.0)
         self.max_element_size_factor_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Max Element Size Factor"))
-        control_layout.addWidget(self.max_element_size_factor_input)
-
+        params_grid.addWidget(self.max_element_size_factor_input, row, 1)
+        
+        # Feature Angle
+        params_grid.addWidget(QLabel("Feature Angle:"), row, 2)
         self.feature_angle_input = QSpinBox()
-        self.feature_angle_input.setRange(0, 180)
+        self.feature_angle_input.setRange(30, 85)
         self.feature_angle_input.setValue(65)
         self.feature_angle_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Feature Angle"))
-        control_layout.addWidget(self.feature_angle_input)
-
+        self.feature_angle_input.setToolTip(
+            "Angle threshold (30-85°) for edge detection.\n"
+            "Adjust if loop detection fails."
+        )
+        params_grid.addWidget(self.feature_angle_input, row, 3)
+        
+        row += 1
+        # Trim Points
+        params_grid.addWidget(QLabel("Trim Points:"), row, 0)
         self.trim_points_input = QSpinBox()
         self.trim_points_input.setRange(0, 1000)
         self.trim_points_input.setValue(0)
         self.trim_points_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Trim Points"))
-        control_layout.addWidget(self.trim_points_input)
-
+        params_grid.addWidget(self.trim_points_input, row, 1)
+        
+        # Centerline Smoothing
+        params_grid.addWidget(QLabel("Centerline Smooth:"), row, 2)
         self.centerline_s_input = QDoubleSpinBox()
         self.centerline_s_input.setRange(0.0, 1.0)
         self.centerline_s_input.setSingleStep(0.001)
         self.centerline_s_input.setValue(0.01)
         self.centerline_s_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Centerline Smoothing"))
-        control_layout.addWidget(self.centerline_s_input)
-
+        params_grid.addWidget(self.centerline_s_input, row, 3)
+        
+        row += 1
+        # Surface Curves Smoothing
+        params_grid.addWidget(QLabel("Curves Smooth:"), row, 0)
         self.surfacecurves_s_input = QDoubleSpinBox()
         self.surfacecurves_s_input.setRange(0.0, 1.0)
         self.surfacecurves_s_input.setSingleStep(0.001)
         self.surfacecurves_s_input.setValue(0.01)
         self.surfacecurves_s_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Surface Curves Smoothing"))
-        control_layout.addWidget(self.surfacecurves_s_input)
-
+        params_grid.addWidget(self.surfacecurves_s_input, row, 1)
+        
+        # Loop Smoothing
+        params_grid.addWidget(QLabel("Loop Smooth:"), row, 2)
         self.loop_smoothing_input = QDoubleSpinBox()
         self.loop_smoothing_input.setRange(0.0, 1.0)
         self.loop_smoothing_input.setSingleStep(0.001)
         self.loop_smoothing_input.setValue(0.0)
         self.loop_smoothing_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Loop Smoothing"))
-        control_layout.addWidget(self.loop_smoothing_input)
-
+        params_grid.addWidget(self.loop_smoothing_input, row, 3)
+        
+        row += 1
+        # Centerline Points
+        params_grid.addWidget(QLabel("Centerline Pts:"), row, 0)
         self.n_centerline_points_input = QSpinBox()
         self.n_centerline_points_input.setRange(50, 2000)
         self.n_centerline_points_input.setValue(500)
         self.n_centerline_points_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Centerline Points"))
-        control_layout.addWidget(self.n_centerline_points_input)
-
+        params_grid.addWidget(self.n_centerline_points_input, row, 1)
+        
+        # Loop Points
+        params_grid.addWidget(QLabel("Loop Pts:"), row, 2)
         self.n_loop_points_input = QSpinBox()
         self.n_loop_points_input.setRange(50, 500)
         self.n_loop_points_input.setValue(100)
         self.n_loop_points_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Loop Points"))
-        control_layout.addWidget(self.n_loop_points_input)
-
+        params_grid.addWidget(self.n_loop_points_input, row, 3)
+        
+        row += 1
+        # Subset Points
+        params_grid.addWidget(QLabel("Subset Pts:"), row, 0)
         self.n_subset_points_input = QSpinBox()
         self.n_subset_points_input.setRange(10, 100)
         self.n_subset_points_input.setValue(20)
         self.n_subset_points_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Subset Points"))
-        control_layout.addWidget(self.n_subset_points_input)
-
+        params_grid.addWidget(self.n_subset_points_input, row, 1)
+        
+        # Marching Record Step
+        params_grid.addWidget(QLabel("Marching Step:"), row, 2)
         self.marching_record_step_input = QSpinBox()
         self.marching_record_step_input.setRange(1, 10)
         self.marching_record_step_input.setValue(5)
         self.marching_record_step_input.setEnabled(False)
-        control_layout.addWidget(QLabel("Marching Record Step"))
-        control_layout.addWidget(self.marching_record_step_input)
+        params_grid.addWidget(self.marching_record_step_input, row, 3)
+        
+        control_main_layout.addLayout(params_grid)
+        
+        # Action buttons (full width) at the end
+        control_main_layout.addWidget(QLabel("<b>Actions:</b>"))
+        
+        self.btn_process = QPushButton("Generate Centerline")
+        self.btn_process.clicked.connect(self.generate_centerline)
+        self.btn_process.setEnabled(False)
+        self.btn_process.setToolTip("Generate a centerline for loaded coil")
+        control_main_layout.addWidget(self.btn_process)
 
-        # Export to Visualizer button (bottom of left panel)
+        self.btn_second_process = QPushButton("Generate Surface Curves")
+        self.btn_second_process.clicked.connect(self.generate_surface_curves)
+        self.btn_second_process.setEnabled(False)
+        self.btn_second_process.setToolTip("Generate surface curves for centerline")
+        control_main_layout.addWidget(self.btn_second_process)
+
+        self.btn_clear = QPushButton("Clear Plot")
+        self.btn_clear.clicked.connect(self.clear_plot)
+        self.btn_clear.setToolTip("Clears the current plot")
+        control_main_layout.addWidget(self.btn_clear)
+        
+        # Export to Visualizer button (prominent)
         self.export_btn = QPushButton("Export to Visualizer")
         self.export_btn.clicked.connect(self.export_to_visualizer)
         self.export_btn.setEnabled(False)
-        control_layout.addWidget(self.export_btn)
-
-        control_layout.addStretch()
-        left_panel = QWidget()
-        left_panel.setLayout(control_layout)
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(left_panel)
-        scroll_area.setMinimumWidth(450)
-        scroll_area.setMaximumWidth(450)
-        main_layout.addWidget(scroll_area, 1)
+        self.export_btn.setStyleSheet("font-weight: bold; padding: 8px;")
+        control_main_layout.addWidget(self.export_btn)
+        
+        # Status label
+        self.status_label = QLabel("Status: Ready")
+        self.status_label.setStyleSheet("color: red; font-size: 10px;")
+        control_main_layout.addWidget(self.status_label)
+        
+        control_main_layout.addStretch()
+        
+        # Add control container directly (no scroll area)
+        main_layout.addWidget(control_container)
 
         # Plot Area
         self.plotter = self.pvqt_interactor()
@@ -1791,20 +1990,18 @@ class OptimizationTab(QWidget):
         # Main layout: left panel for controls, right panel for visualization
         main_layout = QHBoxLayout()
         
-        # Left panel with tabs for parameters
-        left_panel = QVBoxLayout()
+        # Left panel with scroll area for controls
+        left_panel = QWidget()
+        left_panel.setMinimumWidth(500)
+        left_panel.setMaximumWidth(500)
+        left_layout = QVBoxLayout(left_panel)
         
         # Create the tabs for the different sections
         tabs = QTabWidget()
-        tabs.setMaximumWidth(500)
         
         # Coil Parameters Tab
         coil_tab = self.create_coil_tab()
         tabs.addTab(coil_tab, "Coil Parameters")
-        
-        # Cross Section Tab - Hidden for now (redundant with r0 in parameters)
-        # cross_tab = self.create_cross_tab()
-        # tabs.addTab(cross_tab, "Cross Section")
         
         # Volume Tab
         volume_tab = self.create_volume_tab()
@@ -1814,29 +2011,43 @@ class OptimizationTab(QWidget):
         pop_tab = self.create_pop_tab()
         tabs.addTab(pop_tab, "Population")
         
-        left_panel.addWidget(tabs)
+        left_layout.addWidget(tabs)
         
-        # Button layout
-        btn_layout = QVBoxLayout()
+        # Actions section at the bottom
+        left_layout.addWidget(QLabel("<b>Actions:</b>"))
+        
         self.visualize_btn = QPushButton("Visualize Base Coil")
+        self.visualize_btn.setToolTip("Visualize the base coil with current parameters")
+        left_layout.addWidget(self.visualize_btn)
+        
         self.generate_btn = QPushButton("Generate Population")
+        self.generate_btn.setToolTip("Generate a population of coils within specified bounds")
+        left_layout.addWidget(self.generate_btn)
+        
         self.export_btn = QPushButton("Export to Visualizer")
+        self.export_btn.setToolTip("Export selected coil to Field Visualization tab")
+        self.export_btn.setStyleSheet("font-weight: bold; padding: 8px;")
+        left_layout.addWidget(self.export_btn)
         
-        btn_layout.addWidget(self.visualize_btn)
-        btn_layout.addWidget(self.generate_btn)
-        btn_layout.addWidget(self.export_btn)
-        btn_layout.addStretch()
+        # Status label
+        self.status_label = QLabel("Status: Ready")
+        self.status_label.setStyleSheet("color: red; font-size: 10px; padding-top: 5px;")
+        left_layout.addWidget(self.status_label)
         
-        left_panel.addLayout(btn_layout)
+        left_layout.addStretch()
         
         # Right panel for visualization
         right_panel = QVBoxLayout()
+        right_label = QLabel("<b>3D Visualization</b>")
+        right_label.setAlignment(Qt.AlignCenter)
+        right_panel.addWidget(right_label)
+        
         self.vtk_widget = QtInteractor(self)
         self.vtk_widget.setMinimumWidth(600)
         right_panel.addWidget(self.vtk_widget)
         
         # Add both panels to main layout
-        main_layout.addLayout(left_panel)
+        main_layout.addWidget(left_panel)
         main_layout.addLayout(right_panel, 1)
         
         # Connect signals
@@ -1849,48 +2060,60 @@ class OptimizationTab(QWidget):
     def create_coil_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        layout.setSpacing(10)
         
-        title = QLabel("Base Coil Parameters")
-        title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        title = QLabel("<b>Base Coil Parameters</b>")
+        title.setStyleSheet("font-size: 13px; padding-bottom: 5px;")
         layout.addWidget(title)
         
+        # Create grid layout for parameters
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        
         fields = [
-            ('radius_y', base_coil_params['radius_y'], 
-             'min_radius_y', default_coil_bounds['radius_y']['min'], 
-             'max_radius_y', default_coil_bounds['radius_y']['max']),
-            ('turns', base_coil_params['turns'], 
-             'min_turns', default_coil_bounds['turns']['min'], 
-             'max_turns', default_coil_bounds['turns']['max']),
-            ('length', base_coil_params['length'], 
-             'min_length', default_coil_bounds['length']['min'], 
-             'max_length', default_coil_bounds['length']['max']),
-            ('alpha', base_coil_params['alpha'], 
-             'min_alpha', default_coil_bounds['alpha']['min'], 
-             'max_alpha', default_coil_bounds['alpha']['max']),
-            ('r0', base_coil_params['r0'], 
-             'min_r0', default_coil_bounds['r0']['min'], 
-             'max_r0', default_coil_bounds['r0']['max'])
+            ('radius_y', 'Radius Y', base_coil_params['radius_y'], 
+             default_coil_bounds['radius_y']['min'], default_coil_bounds['radius_y']['max']),
+            ('turns', 'Turns', base_coil_params['turns'], 
+             default_coil_bounds['turns']['min'], default_coil_bounds['turns']['max']),
+            ('length', 'Length', base_coil_params['length'], 
+             default_coil_bounds['length']['min'], default_coil_bounds['length']['max']),
+            ('alpha', 'Alpha', base_coil_params['alpha'], 
+             default_coil_bounds['alpha']['min'], default_coil_bounds['alpha']['max']),
+            ('r0', 'r0 (Wire Radius)', base_coil_params['r0'], 
+             default_coil_bounds['r0']['min'], default_coil_bounds['r0']['max'])
         ]
         
-        for field in fields:
-            hbox = QHBoxLayout()
-            label_text = field[0]
-            if field[0] == 'r0':
-                label_text = "r0 (Wire Radius)"
-            hbox.addWidget(QLabel(label_text + ":"))
-            hbox.addWidget(self.create_line_edit(field[0], str(field[1])))
-            hbox.addWidget(QLabel("min:"))
-            hbox.addWidget(self.create_line_edit(field[2], str(field[3])))
-            hbox.addWidget(QLabel("max:"))
-            hbox.addWidget(self.create_line_edit(field[4], str(field[5])))
-            layout.addLayout(hbox)
+        row = 0
+        for field_name, label_text, default_val, min_val, max_val in fields:
+            # Parameter name label
+            grid.addWidget(QLabel(label_text + ":"), row, 0)
+            
+            # Value input
+            grid.addWidget(self.create_line_edit(field_name, str(default_val)), row, 1)
+            
+            # Min label and input
+            grid.addWidget(QLabel("Min:"), row, 2)
+            grid.addWidget(self.create_line_edit(f'min_{field_name}', str(min_val)), row, 3)
+            
+            # Max label and input
+            grid.addWidget(QLabel("Max:"), row, 4)
+            grid.addWidget(self.create_line_edit(f'max_{field_name}', str(max_val)), row, 5)
+            
+            row += 1
         
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel("Min Spacing between turns:"))
+        layout.addLayout(grid)
+        
+        # Min spacing section
+        layout.addWidget(QLabel("<b>Constraint:</b>"))
+        spacing_layout = QHBoxLayout()
+        spacing_layout.addWidget(QLabel("Min Spacing (x-distance):"))
         self.min_spacing_edit = QLineEdit("0.75")
-        hbox.addWidget(self.min_spacing_edit)
-        hbox.addWidget(QLabel("(x-distance between turns, 0.8 recommended)"))
-        layout.addLayout(hbox)
+        self.min_spacing_edit.setFixedWidth(60)
+        spacing_layout.addWidget(self.min_spacing_edit)
+        # spacing_layout.addWidget(QLabel("(0.8 recommended)"))
+        spacing_layout.addStretch()
+        layout.addLayout(spacing_layout)
         
         layout.addStretch()
         
@@ -1925,71 +2148,115 @@ class OptimizationTab(QWidget):
     def create_volume_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        layout.setSpacing(10)
         
-        title = QLabel("Volume Parameters (Cylindrical)")
-        title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        title = QLabel("<b>Volume Parameters (Cylindrical)</b>")
+        title.setStyleSheet("font-size: 13px; padding-bottom: 5px;")
         layout.addWidget(title)
         
-        layout.addWidget(QLabel("Volume is centered at the coil's center (0,0,0)."))
+        info = QLabel("Volume is centered at the coil's center (0,0,0).")
+        info.setStyleSheet("font-style: italic; color: gray; padding-bottom: 10px;")
+        layout.addWidget(info)
         
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel("Cylinder Radius:"))
+        # Cylinder dimensions
+        layout.addWidget(QLabel("<b>Cylinder Dimensions:</b>"))
+        dims_layout = QHBoxLayout()
+        dims_layout.addWidget(QLabel("Radius:"))
         self.vol_radius_edit = QLineEdit(str(default_volume['radius']))
-        hbox.addWidget(self.vol_radius_edit)
-        hbox.addWidget(QLabel("Length:"))
+        self.vol_radius_edit.setFixedWidth(80)
+        dims_layout.addWidget(self.vol_radius_edit)
+        dims_layout.addSpacing(20)
+        dims_layout.addWidget(QLabel("Length:"))
         self.vol_length_edit = QLineEdit(str(default_volume['length']))
-        hbox.addWidget(self.vol_length_edit)
-        layout.addLayout(hbox)
+        self.vol_length_edit.setFixedWidth(80)
+        dims_layout.addWidget(self.vol_length_edit)
+        dims_layout.addStretch()
+        layout.addLayout(dims_layout)
         
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel("Cylinder Axis (x,y,z):"))
+        # Cylinder axis
+        layout.addWidget(QLabel("<b>Cylinder Axis (x, y, z):</b>"))
+        axis_layout = QHBoxLayout()
+        axis_layout.addWidget(QLabel("x:"))
         self.axis_x_edit = QLineEdit(str(default_volume['axis_x']))
+        self.axis_x_edit.setFixedWidth(80)
+        axis_layout.addWidget(self.axis_x_edit)
+        axis_layout.addWidget(QLabel("y:"))
         self.axis_y_edit = QLineEdit(str(default_volume['axis_y']))
+        self.axis_y_edit.setFixedWidth(80)
+        axis_layout.addWidget(self.axis_y_edit)
+        axis_layout.addWidget(QLabel("z:"))
         self.axis_z_edit = QLineEdit(str(default_volume['axis_z']))
-        hbox.addWidget(self.axis_x_edit)
-        hbox.addWidget(self.axis_y_edit)
-        hbox.addWidget(self.axis_z_edit)
-        layout.addLayout(hbox)
+        self.axis_z_edit.setFixedWidth(80)
+        axis_layout.addWidget(self.axis_z_edit)
+        axis_layout.addStretch()
+        layout.addLayout(axis_layout)
         
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel("Spacing:"))
+        # Sampling spacing
+        layout.addWidget(QLabel("<b>Sampling:</b>"))
+        spacing_layout = QHBoxLayout()
+        spacing_layout.addWidget(QLabel("Point Spacing:"))
         self.spacing_edit = QLineEdit(str(default_volume['spacing']))
-        hbox.addWidget(self.spacing_edit)
-        layout.addLayout(hbox)
+        self.spacing_edit.setFixedWidth(80)
+        spacing_layout.addWidget(self.spacing_edit)
+        spacing_layout.addStretch()
+        layout.addLayout(spacing_layout)
+        
+        layout.addStretch()
         
         return tab
         
     def create_pop_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        layout.setSpacing(10)
         
-        title = QLabel("Population Settings")
-        title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        title = QLabel("<b>Population Settings</b>")
+        title.setStyleSheet("font-size: 13px; padding-bottom: 5px;")
         layout.addWidget(title)
         
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel("Number of Coils:"))
+        # Population size
+        layout.addWidget(QLabel("<b>Generation:</b>"))
+        pop_layout = QHBoxLayout()
+        pop_layout.addWidget(QLabel("Number of Coils:"))
         self.pop_size_edit = QLineEdit("50")
-        hbox.addWidget(self.pop_size_edit)
-        layout.addLayout(hbox)
+        self.pop_size_edit.setFixedWidth(80)
+        pop_layout.addWidget(self.pop_size_edit)
+        pop_layout.addStretch()
+        layout.addLayout(pop_layout)
         
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel("Enter Coil ID to Visualize:"))
+        layout.addSpacing(10)
+        
+        # Coil selection
+        layout.addWidget(QLabel("<b>Coil Selection:</b>"))
+        select_layout = QHBoxLayout()
+        select_layout.addWidget(QLabel("Coil ID:"))
         self.coil_id_edit = QLineEdit()
+        self.coil_id_edit.setFixedWidth(80)
+        self.coil_id_edit.setPlaceholderText("Enter ID")
+        select_layout.addWidget(self.coil_id_edit)
         self.view_coil_btn = QPushButton("View Selected Coil")
-        hbox.addWidget(self.coil_id_edit)
-        hbox.addWidget(self.view_coil_btn)
-        layout.addLayout(hbox)
+        select_layout.addWidget(self.view_coil_btn)
+        select_layout.addStretch()
+        layout.addLayout(select_layout)
         
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel("Performance Plot:"))
+        layout.addSpacing(10)
+        
+        # Performance plot
+        layout.addWidget(QLabel("<b>Performance Analysis:</b>"))
+        plot_layout = QHBoxLayout()
+        plot_layout.addWidget(QLabel("Parameter:"))
         self.param_combo = QComboBox()
         self.param_combo.addItems(["none", "radius_y", "turns", "length", "alpha", "r0"])
+        self.param_combo.setFixedWidth(120)
+        plot_layout.addWidget(self.param_combo)
         self.plot_btn = QPushButton("Show Performance Plot")
-        hbox.addWidget(self.param_combo)
-        hbox.addWidget(self.plot_btn)
-        layout.addLayout(hbox)
+        plot_layout.addWidget(self.plot_btn)
+        plot_layout.addStretch()
+        layout.addLayout(plot_layout)
         
+        layout.addStretch()
+        
+        # Connect signals
         self.view_coil_btn.clicked.connect(self.view_selected_coil)
         self.plot_btn.clicked.connect(self.show_performance_plot)
         
@@ -2079,12 +2346,21 @@ class OptimizationTab(QWidget):
             return
         
         try:
+            self.status_label.setText("Status: Generating base coil...")
+            QApplication.processEvents()
+            
             combined_params = params_dict['coil_params']
             volume = params_dict['volume']
             
             coil_pts = generate_base_coil(combined_params)
             coil_pts, _ = center_coil(coil_pts)
+            
+            self.status_label.setText("Status: Generating surface curves...")
+            QApplication.processEvents()
             surface_curves = generate_surface_curves(coil_pts, {'r0': combined_params['r0']})
+            
+            self.status_label.setText("Status: Rendering visualization...")
+            QApplication.processEvents()
             
             # Visualize in optimization tab
             self.plot_coil_in_optimization_tab(coil_pts, surface_curves, volume)
@@ -2093,7 +2369,10 @@ class OptimizationTab(QWidget):
             if self.field_viz_tab:
                 self.field_viz_tab.set_coil_data(coil_pts, surface_curves)
             
+            self.status_label.setText("Status: Base coil visualization complete!")
+            
         except Exception as e:
+            self.status_label.setText(f"Status: Error - {str(e)}")
             QMessageBox.critical(self, "Error", f"Visualization failed: {str(e)}")
 
     def plot_coil_in_optimization_tab(self, coil_pts, surface_curves, volume):
@@ -2145,6 +2424,9 @@ class OptimizationTab(QWidget):
             QMessageBox.critical(self, "Input Error", str(e))
             return
         
+        self.status_label.setText("Status: Initializing population generation...")
+        QApplication.processEvents()
+        
         coil_params = params_dict['coil_params']
         coil_bounds = params_dict['coil_bounds']
         cross_params = params_dict['cross_params']
@@ -2152,12 +2434,20 @@ class OptimizationTab(QWidget):
         volume = params_dict['volume']
         min_spacing = params_dict['min_spacing']
         
+        self.status_label.setText("Status: Generating sample points...")
+        QApplication.processEvents()
         sample_points = get_volume_sample_points(volume)
         
         avg_Bx_list, var_Bx_list, coil_ids = [], [], []
         self.population_list = []
         
         for i in range(pop_size):
+            # Update status every 5 coils or at specific milestones
+            if i % max(1, pop_size // 10) == 0 or i == 0:
+                progress = int((i / pop_size) * 100)
+                self.status_label.setText(f"Status: Generating coil {i+1}/{pop_size} ({progress}% complete)...")
+                QApplication.processEvents()
+            
             valid = False
             iter_count = 0
             max_iter = 50
@@ -2197,6 +2487,9 @@ class OptimizationTab(QWidget):
                 'var_Bx': var_Bx
             })
         
+        self.status_label.setText("Status: Creating performance plot...")
+        QApplication.processEvents()
+        
         self.performance_data = {"avg": avg_Bx_list, "var": var_Bx_list, "ids": coil_ids}
         
         plt.figure()
@@ -2208,6 +2501,9 @@ class OptimizationTab(QWidget):
         plt.title("Coil Population Performance")
         plt.grid(True)
         plt.show(block=False)
+        
+        self.status_label.setText("Status: Visualizing first coil...")
+        QApplication.processEvents()
         
         # Update field visualization with the first coil in the population
         if self.population_list:
@@ -2221,6 +2517,8 @@ class OptimizationTab(QWidget):
             # Also set in field visualization tab
             if self.field_viz_tab:
                 self.field_viz_tab.set_coil_data(coil_pts, surface_curves)
+        
+        self.status_label.setText(f"Status: Population generation complete! Generated {len(self.population_list)} coils.")
 
     def view_selected_coil(self):
         if not self.population_list:
@@ -2233,6 +2531,9 @@ class OptimizationTab(QWidget):
             QMessageBox.critical(self, "Input Error", "Please enter a valid integer Coil ID.")
             return
         
+        self.status_label.setText(f"Status: Searching for coil ID {coil_id}...")
+        QApplication.processEvents()
+        
         selected = None
         for coil in self.population_list:
             if coil['coil_id'] == coil_id:
@@ -2240,6 +2541,7 @@ class OptimizationTab(QWidget):
                 break
                 
         if selected is None:
+            self.status_label.setText(f"Status: Coil ID {coil_id} not found")
             QMessageBox.warning(self, "Not Found", f"Coil ID {coil_id} not found in the population.")
             return
         
@@ -2247,13 +2549,22 @@ class OptimizationTab(QWidget):
         
         # Always plot the coil geometry
         try:
+            self.status_label.setText(f"Status: Loading coil ID {coil_id}...")
+            QApplication.processEvents()
+            
             params_dict = self.get_params()
             if not params_dict:
                 return
                 
             volume = params_dict['volume']
             coil_pts = selected['coil_points']
+            
+            self.status_label.setText(f"Status: Generating surface curves for coil ID {coil_id}...")
+            QApplication.processEvents()
             surface_curves = generate_surface_curves(coil_pts, selected['cross_params'])
+            
+            self.status_label.setText(f"Status: Rendering coil ID {coil_id}...")
+            QApplication.processEvents()
             
             # Visualize in optimization tab
             self.plot_coil_in_optimization_tab(coil_pts, surface_curves, volume)
@@ -2261,7 +2572,11 @@ class OptimizationTab(QWidget):
             # Also set in field visualization tab
             if self.field_viz_tab:
                 self.field_viz_tab.set_coil_data(coil_pts, surface_curves)
+            
+            self.status_label.setText(f"Status: Coil ID {coil_id} loaded successfully!")
+            
         except Exception as e:
+            self.status_label.setText(f"Status: Error loading coil - {str(e)}")
             QMessageBox.critical(self, "Visualization Error", str(e))
         
         param_info = f"Coil ID: {selected['coil_id']}\n\nCenterline Parameters:\n"

@@ -282,14 +282,17 @@ def extract_coil_end_loops(surf_poly, feature_angle=55.0):
         loops = [split_edges]
     n_loops = len(loops)
     if n_loops != 2:
-        plotter = pv.Plotter()
-        plotter.add_mesh(surf_poly, color="blue", opacity=0.5, label="Surface Mesh")
-        for i, loop in enumerate(loops):
-            plotter.add_mesh(loop, color="red", line_width=4, label=f"Loop {i}")
-        plotter.show(title="Error: Surface Mesh + Detected Loops")
+        # Log the error without trying to visualize (which can cause crashes)
+        logging.error(
+            f"Expected exactly 2 end loops, but found {n_loops}. "
+            f"Feature angle: {feature_angle}°. "
+            "Try adjusting the feature angle (typical range: 30-85 degrees). "
+            "For this geometry, try values around 50-75 degrees."
+        )
         raise ValueError(
             f"Expected exactly 2 end loops, but found {n_loops}. "
-            "Please check your geometry or feature_angle."
+            f"Please adjust the feature angle (current: {feature_angle}°). "
+            "Typical working range: 30-85 degrees."
         )
     return loops
 
