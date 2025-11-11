@@ -66,108 +66,258 @@ The main application window will open with three tabs:
 **Workflow**:
 1. Select file type (STL, STEP, or MSH) using radio buttons
 2. Click "Load File" and select your coil geometry file
-3. **For STEP files only**: Configure meshing parameters:
-   - **Element Size**: Base mesh element size (smaller = finer mesh)
-   - **Size Factor**: Multiplier for element size (adjust mesh density)
-   - **Sizing Mode**: Uniform or adaptive mesh sizing
-   - **Feature Angle**: Angle threshold for edge detection (30-90°, default 75°)
-4. Click "Generate Surface Curves" to extract current paths on the coil surface
-5. Click "Export to Visualizer" to send the processed coil to the Field Visualization tab
+3. The application **automatically** extracts the centerline and generates surface curves
+4. View the processed geometry in the 3D visualization panel
+5. (Optional) Adjust processing parameters and click "Generate Surface Curves" to regenerate
+6. Click "Export to Visualizer" (at bottom of panel) to send the coil to the Field Visualization tab
+
+**Parameter Availability by File Type**:
+
+*STL files*:
+- Only **Feature Angle** parameter is enabled (for edge detection)
+- All other parameters are disabled (mesh already exists)
+
+*STEP files*:
+- **All parameters** are enabled:
+  - **Meshing parameters**: Sizing Mode, Element Size, Max Size Factor
+  - **Processing parameters**: Feature Angle, Trim Points, Centerline Smoothing, Surface Curves Smoothing, Loop Smoothing, and point counts
+
+*MSH files*:
+- **Meshing parameters** are disabled (mesh already exists)
+- **Processing parameters** are enabled (Feature Angle, smoothing, point counts)
+
+**Key Parameters**:
+- **Element Size**: Base mesh element size in mm (STEP only)
+- **Max Size Factor**: Multiplier for element size (STEP only)
+- **Sizing Mode**: Uniform or curvature-based mesh sizing (STEP only)
+- **Feature Angle**: Angle threshold for edge detection (30-85°, default: 65-75°)
+- **Loop Smoothing**: Smoothing factor for end loops (STEP and MSH only)
+
+**Status Messages**:
+- Red status messages at the top show processing progress
+- Messages update during: loading, meshing, centerline extraction, surface curve generation
 
 **Notes**:
-- The geometry will be plotted in the visualization window after loading
-- For STEP files, a .msh file is generated and can be reloaded later to skip meshing
-- Surface curves represent approximations of current distribution on the coil
+- The geometry is automatically plotted in the visualization window after loading
+- For STEP files, a .msh file is generated in the same directory and can be reloaded later to skip meshing
+- Surface curves represent approximations of current distribution on the coil surface
+- The Mesh Processor uses a **two-column compact grid layout** for efficient parameter organization
+- A **Clear Plot** button is available to clear the current visualization
 
 
 ### 2. Optimization Tab
 
-**Purpose**: Generate and evaluate populations of parametric coil designs
+**Purpose**: Generate and evaluate populations of parametric coil designs for field uniformity optimization
 
-**Coil Parameters**:
+**Tab Structure**:
+The Optimization tab contains three sub-tabs:
+1. **Coil**: Define parametric coil geometry and parameter bounds
+2. **Volume**: Define evaluation region for field uniformity
+3. **Population**: Generate populations and analyze performance
 
-Adjustable parameters with min/max bounds for optimization:
-- **radius_y**: Coil radius in Y-Z plane
+**Coil Parameters (Coil sub-tab)**:
+
+Parameters are organized in a grid with Value, Min, and Max columns:
+- **radius_y**: Coil radius in Y-Z plane (mm)
 - **turns**: Number of coil turns
-- **length**: Coil length along X-axis
-- **alpha**: Sigmoid sharpness parameter (controls turn spacing)
-- **r0**: Wire radius (cross-section)
-- **Min Spacing**: Minimum spacing between adjacent turns
+- **length**: Coil length along X-axis (mm)
+- **alpha**: Sigmoid sharpness parameter (controls turn spacing distribution)
+- **r0**: Wire radius / cross-section radius (mm)
+- **Min Turn Spacing**: Minimum spacing between adjacent turns (mm, typically 0.8 mm)
 
-**Volume Definition**:
+For each parameter, set:
+- **Value**: Base/starting value
+- **Min**: Minimum bound for population generation
+- **Max**: Maximum bound for population generation
 
-Define cylindrical volume for field evaluation:
-- Cylinder radius and length
-- Axis direction (x, y, z components)
-- Point spacing for field sampling
+**Volume Definition (Volume sub-tab)**:
 
-**Population Generation**:
+Define cylindrical evaluation region organized in sections:
+- **Dimensions**: Cylinder radius and length (mm)
+- **Axis**: Direction vector (x, y, z) - automatically normalized
+- **Sampling**: Point spacing for field evaluation (mm)
 
-1. Set "Number of Coils" for population size
-2. Click "Generate Population" to create randomized coil variations
-3. Each coil is evaluated for field uniformity in the defined volume
+The evaluation volume is centered at (0, 0, 0).
 
-**Visualization**:
+**Population Generation (Population sub-tab)**:
 
-- Click "Visualize Base Coil" to preview the base coil design
-- Enter a Coil ID and click "View Selected Coil" to visualize specific designs
-- Use "Show Performance Plot" to analyze parameter vs. performance correlations
+**Generation section**:
+1. Set **Population Size** (number of coil designs to generate)
+2. Click **"Generate Population"**
+3. Status messages show progress:
+   - Initialization
+   - Sample generation (updates every 10%)
+   - Performance plot creation
+   - First coil visualization
+4. A **2D scatter plot automatically appears** showing:
+   - X-axis: Average |Bₓ| (mean field strength in evaluation volume)
+   - Y-axis: Variance of Bₓ (field uniformity - lower is better)
+   - Each point represents one coil, labeled with its ID
+
+**Selection section**:
+- Enter a **Coil ID** (0 to N-1)
+- Click **"View Selected Coil"** to visualize that specific design
+- A popup displays all parameter values for the selected coil
+
+**Analysis section**:
+- Select a parameter from the dropdown: none, radius_y, turns, length, alpha, or r0
+- Click **"Show Performance Plot"** to generate:
+  - **"none"**: 2D plot (Average |Bₓ| vs Variance)
+  - **Specific parameter**: 3D plot with parameter value as Z-axis
+- Use these plots to understand how parameters affect field uniformity
+
+**Performance Metrics**:
+- **Average |Bₓ|**: Mean absolute value of X-component of magnetic field
+- **Variance of Bₓ**: Statistical variance - lower values indicate more uniform fields
+- Goal: Find coils with low variance (good uniformity) and adequate field strength
+
+**Status Messages**:
+- Red status messages at top of tab show progress during all operations
+- Messages update during generation, visualization, and coil selection
 
 **Export to Field Visualization**:
 
-Click "Export to Visualizer" to send the current coil to the Field Visualization tab for detailed analysis.
+At the bottom of the left panel:
+- Click **"Export to Visualizer"** to send the current coil to Field Visualization tab for detailed analysis
+- Confirmation message appears when export is successful
 
 
 ### 3. Field Visualization Tab
 
 **Purpose**: Calculate and visualize electromagnetic fields around the coil
 
-**Region Definition**:
+**Tab Structure**:
+The Field Visualization tab has two sub-tabs in the left panel:
+1. **Region Setup**: Define where to compute fields
+2. **Field Computation**: Configure field calculation settings
+
+**Always-Visible Visualization Controls** (bottom of left panel):
+- **Display Mode** dropdown: 9 visualization options
+- **Vector Scale**: Adjust arrow lengths
+- **Visibility checkboxes** (2×3 grid): Hide Centerline, Hide Surf. Curves, Hide Geometry, Hide Region, Hide Grid, Hide Axes
+- **Grid settings**: Grid spacing and size for reference grid
+
+---
+
+#### Region Setup Tab
 
 Choose one of three region types for field computation:
 
-- **Volume**: Rectangular 3D region
-  - Set X, Y, Z min/max bounds
-  - Specify spacing between computation points
-  - Optional: Exclude points inside mesh with exclusion distance
+**Volume**: Rectangular 3D region
+- **Bounding box**: X/Y/Z Min and Max in compact 3×2 grid layout
+- **Spacing**: Distance between computation points (mm)
+- **Point Filtering section**:
+  - Checkbox: "Exclude points inside surface mesh"
+  - Exclusion distance (default: 0.25 mm)
+  - Note: Only works with STEP/STL/MSH files (not parametric coils)
+- **Visualize Region** button at bottom: Preview the volume before computing
 
-- **Plane**: 2D planar region
-  - Define plane origin (x, y, z)
-  - Specify plane normal vector
-  - Set plane dimensions (length × width)
-  - Specify point spacing
+**Plane**: 2D planar region
+- **Origin**: Plane center point (x, y, z) - comma-separated
+- **Normal**: Direction perpendicular to plane (x, y, z) - automatically normalized
+- **Length and Width**: Plane dimensions (mm)
+- **Spacing**: Point spacing on the plane (mm)
+- **Visualize Region** button: Shows plane with corner markers and normal vector
 
-- **Line**: 1D linear region
-  - Define start and end points
-  - Set number of points along the line
+**Line**: 1D linear region
+- **Start Point**: (x, y, z) - comma-separated
+- **End Point**: (x, y, z) - comma-separated
+- **Number of Points**: How many points along the line
+- **Visualize Region** button: Shows line with endpoint markers
 
-**Field Computation**:
+**Region Visualization**:
+- Click "Visualize Region" to preview the computation region
+- Volume regions show as orange wireframe edges (not all interior points)
+- Helps verify region placement before computing fields
 
-1. Select field type: **B-field (magnetic)** or **E-field (electric)**
-   - E-field computation requires frequency (currently greyed out)
-2. Set current value (Amperes)
-3. Choose whether to use surface curves or centerline
-4. Click "Compute Field" to calculate field values
+---
 
-**Visualization Modes**:
+#### Field Computation Tab
 
-After computation, select from various display modes:
-- **Vector- Magnitude (Color), Direction (Arrow)**: Color-coded magnitude with direction arrows
-- **Vector, Magnitude & Direction**: Combined vector and magnitude display
-- **Magnitude**: Scalar field magnitude only
-- **Bx, By, Bz (Color Only)**: Individual field components as color maps
-- **Bx, By, Bz (Arrow)**: Individual components as vector arrows
+**Field Type section**:
+- Select **B-field (magnetic)** or **E-field (electric)**
+- Frequency field (MHz) - currently disabled for B-field
 
-**Display Options** (checkboxes):
-- Hide/show coil geometry (surface mesh)
-- Hide/show centerline
-- Hide/show coordinate axes
-- Hide/show computation region points
-- Hide/show reference grid
+**Current Path section**:
+- **Radio buttons**: Surface Curves (more accurate) or Centerline (faster)
+- **Coil Current (A)**: Current value for field scaling (default: 1.0 A)
 
-**Additional Features**:
-- **Compute Inductance**: Calculate static inductance from B-field (volume must enclose coil)
-- **Export Data**: Save field values and metadata to CSV files
+**Inductance Calculation section**:
+- **"Compute Inductance from B-Field"** button
+- Only works if B-field was computed over a volume that fully encloses the coil
+- Result displayed in "Inductance:" field below button
+
+**Export Settings section**:
+- **Base Name** field: Enter filename base for CSV export
+
+**Action Buttons** (at bottom of tab):
+- **"Compute Field"**: Calculate electromagnetic field in defined region
+- **"Export Data"**: Save field data to CSV file
+
+---
+
+#### Visualization Controls (Always Accessible)
+
+Located at the bottom of the left panel, always visible regardless of which sub-tab is active:
+
+**Display Mode dropdown** (9 options):
+1. Vector- Magnitude (Color), Direction (Arrow)
+2. Vector, Magnitude & Direction
+3. Magnitude
+4. Bx (Color Only)
+5. Bx (Arrow)
+6. By (Color Only)
+7. By (Arrow)
+8. Bz (Color Only)
+9. Bz (Arrow)
+
+**Vector Scale**: Adjust arrow lengths for vector visualizations (default: 1.0)
+
+**Visibility Checkboxes** (2×3 grid):
+- Hide Centerline
+- Hide Surf. Curves
+- Hide Geometry
+- Hide Region
+- Hide Grid
+- Hide Axes
+
+**Grid Settings**:
+- **Grid spacing**: Distance between reference grid points (default: 1 mm)
+- **Size**: Total side length of cubic reference grid (default: 20 mm)
+- The grey reference grid helps visualize spatial scale
+
+---
+
+#### Field Computation Workflow
+
+1. **Define Region** (Region Setup tab):
+   - Select region type (Volume/Plane/Line)
+   - Set parameters
+   - Click "Visualize Region" to preview
+
+2. **Configure Computation** (Field Computation tab):
+   - Select B-field or E-field
+   - Choose Surface Curves or Centerline
+   - Set current value
+   - Click "Compute Field"
+
+3. **Visualize Results** (Visualization Controls):
+   - Select Display Mode
+   - Adjust Vector Scale
+   - Toggle visibility of elements
+   - Rotate/zoom 3D view
+
+4. **Export** (Field Computation tab):
+   - Enter base filename
+   - Click "Export Data"
+   - CSV file created: `[basename]-[regiontype][count].csv`
+   - Contains columns: x, y, z, Bx, By, Bz
+
+**Additional Notes**:
+- Computation time depends on number of points and whether using surface curves or centerline
+- For large volumes (>10,000 points), computation may take several minutes
+- Terminal output shows progress and confirmation messages
+- Field magnitudes are in Tesla (T)
 
 
 ## File Structure
@@ -178,5 +328,12 @@ RF-Coil_B1Field_Simulator/
 ├── helpers.py                   # Geometry processing utilities
 ├── README.md                    # This file
 ├── LICENSE                      # License information
+├── tutorial/
+│   └── TUTORIAL.md              # Comprehensive step-by-step tutorial
 └── venv/                        # Python virtual environment (created by user)
 ```
+
+## Additional Resources
+
+- **Tutorial**: See `tutorial/TUTORIAL.md` for detailed step-by-step instructions with examples
+- **Terminal Output**: Keep the terminal window visible while using the application for progress updates and error messages
