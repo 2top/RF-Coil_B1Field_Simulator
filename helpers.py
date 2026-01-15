@@ -296,6 +296,41 @@ def extract_coil_end_loops(surf_poly, feature_angle=55.0):
         )
     return loops
 
+def compute_marching_rings(surf_poly: pv.PolyData,
+                           loopA: pv.PolyData,
+                           loopB: pv.PolyData) -> list[set]:
+    """
+    Return the marching_record (list of vertex-index sets) without
+    collapsing them into center points. Essentially the same marching
+    loop from compute_centerline_3d_mce, but stops after collecting rings.
+    """
+    pv_faces = surf_poly.faces.reshape((-1, 4))[:, 1:]
+    vertices = surf_poly.points
+
+    loopA_plane_centroid, loopA_plane_normal = compute_best_fit_plane(loopA.points)
+    loopB_plane_centroid, loopB_plane_normal = compute_best_fit_plane(loopB.points)
+
+    endA_vertex_indices = select_vertices_near_plane(surf_poly, loopA_plane_centroid, loopA_plane_normal, TOL)
+    endB_vertex_indices = select_vertices_near_plane(surf_poly, loopB_plane_centroid, loopB_plane_normal, TOL)
+
+    all_vertex_indices = set(range(len(vertices)))
+    inactive_vertex_indices = set(endA_vertex_indices).union(set(endB_vertex_indices))
+    active_vertex_indices = all_vertex_indices - inactive_vertex_indices
+
+    pv_faces_set = set()
+    for f_idx, face in enumerate(pv_faces):
+        if any(v in active_vertex_indices for v in face):
+            pv_faces_set.add(f_idx)
+
+    # Build initial moving/reference sets using coordinates that exist in surf_poly
+    def _find_indices(poly: pv.PolyData, all_pts: np.ndarray) -> set:
+        coord_to_index = {tuple(pt): i for i, pt in enumerate(all_pts)}
+        idxs = [coord_to_index.get(tuple(pt), -1) for pt in poly.points]
+        return {i for i in idxs if i >= 0}
+
+    V_mov = _find_indices(loopA, vertices)
+    V_ref = _find_indices(loopB, vertices)
+
 def compute_centerline_3d_mce(surf_poly: pv.PolyData, loopA: pv.PolyData, loopB: pv.PolyData) -> Tuple[Optional[np.ndarray], List[set]]:
     """
     Compute the centerline using a modified marching algorithm.
@@ -430,6 +465,42 @@ def trim_end(raw_points: np.ndarray, n_trim: int) -> np.ndarray:
     if not np.allclose(trimmed[-1], raw_points[-1], atol=1e-6):
         trimmed = np.vstack([trimmed, raw_points[-1]])
     return trimmed
+
+def smooth_centerline(centerline_points: np.ndarray, s: float = 1.0, k: int = 3, n_interp: int = 200) -> np.ndarray:
+    """
+    Smooth the centerline using spline interpolation with endpoint weighting.
+    
+    Parameters:
+        centerline_points: Array of centerline points.
+        s: Smoothing factor.
+        k: Spline degree.
+        n_interp: Number of interpolated points.
+    
+    Returns:
+        Smoothed centerline points.
+    """
+    if centerline_points.shape[0] < 3:
+        return centerline_points.copy()
+    x, y, z = centerline_points.T
+    weights = np.ones(centerline_points.shape[0])
+    weights[0] = ENDPOINT_WEIGHT
+    weights[-1] = ENDPOINT_WEIGHT
+    diffs = np.diff(centerline_points, axis=0)
+    seg_lengths = np.linalg.norm(diffs, axis=1)
+    t = np.concatenate(([0], np.cumsum(seg_lengths)))
+    total_length = t[-1]
+    if total_length < EPS:
+        return centerline_points.copy()
+    t /= total_length
+    try:
+        tck, _ = splprep([x, y, z], u=t, w=weights, s=s, k=k)
+        u_new = np.linspace(0, 1, n_interp)
+        x_new, y_new, z_new = splev(u_new, tck)
+        smoothed_points = np.vstack((x_new, y_new, z_new)).T
+        return smoothed_points
+    except Exception as e:
+        logging.error(f"Centerline smoothing failed: {e}")
+        return centerline_points.copy()
 
 # -----------------------------------------------------------------------------
 # End Loop and Intermediate Contour Functions

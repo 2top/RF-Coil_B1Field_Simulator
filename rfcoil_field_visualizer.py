@@ -1691,25 +1691,84 @@ class MeshProcessorTab(QWidget):
     def load_file(self):
         file_dialog = QFileDialog()
         file_filter = ""
+
+        self.element_size = self.element_size_input.value()
+        self.max_element_size_factor = self.max_element_size_factor_input.value()
+        # This currently needs to be set before load file is called... will want to change this in the future.
+        # self.msh_file = self.mesh_name_input.text().strip() or "generated_mesh.msh"
+        
         if self.accept_stl:
             file_filter = "STL Files (*.stl)"
         elif self.accept_stp:
             file_filter = "STEP Files (*.stp *.step)"
         elif self.accept_msh:
-            file_filter = "Mesh Files (*.msh)"
+            file_filter = "MSH Files (*.msh *.mesh)"
         else:
-            file_filter = "All Files (*.*)"
+            file_filter = "" # This should never happen, but just in case
+            logging.error("No file type selected. Please select a file type before loading a file.")
 
         self.input_file, _ = file_dialog.getOpenFileName(self, "Open File", "", file_filter)
         if not self.input_file:
             return
         self.loaded_file.setText(f"Loaded: {os.path.basename(self.input_file)}")
-        self.btn_process.setEnabled(True)
-        self.feature_angle_input.setEnabled(True)
         
-        # Automatically process the file after loading
-        self.process_loaded_file()
-    
+        # Display Plot
+        try:
+            self.clear_plot()
+
+            # Handle mesh name - Update this so it is only for creating a msh file if needed
+            #timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+
+            # if not os.path.isfile(os.path.basename(self.mesh_name_input.text())) and self.mesh_name_input.text() is not None and os.path.basename(self.mesh_name_input.text()) != "":
+            #     # Mesh name does not exist
+            #     self.msh_file = self.mesh_name_input.text()
+            #     if not self.msh_file.endswith(".msh"): self.msh_file += ".msh" # Ensure the file has a .msh extension
+            # elif os.path.isfile(self.mesh_name_input.text()):
+            #     # Mesh name exists, so add a timestamp to the file name. We do not check basename because we are looking for .msh files
+            #     self.msh_file = f"{self.mesh_name_input.text()}_{timestamp}.msh"
+            # else:
+            #     # Mesh name does not exist or was null, use the input file name with a timestamp
+            #     self.msh_file = f"{os.path.basename(self.input_file)}_{timestamp}.msh"
+
+            self.status_label.setText("Status: Loading file...")
+            self.surf_poly = self.helpers.load_surface_mesh(
+                self.input_file,
+                self.msh_file if (self.accept_stp or self.accept_stl) else self.input_file,
+                self.stp_check(self.element_size, 0.15),
+                self.stp_check(self.max_element_size_factor, 2.0)
+            )
+
+            if self.surf_poly is None or self.surf_poly.n_points == 0:
+                self.status_label.setText("Error: Failed to load surface mesh")
+                return
+
+            # Draw immediately in the embedded QtInteractor
+            self.status_label.setText("Status: Displaying mesh...")
+            self.plotter.clear()
+            self.plotter.add_mesh(
+                self.surf_poly,
+                color="lightsteelblue",
+                show_edges=True,
+                smooth_shading=True,
+                label="Loaded Surface"
+            )
+            try:
+                # avoid stacking legends across loads
+                self.plotter.remove_legend()
+            except Exception:
+                pass
+            self.plotter.reset_camera()
+            self.plotter.render()
+
+            self.status_label.setText("Status: File loaded and displayed")
+            self.btn_process.setEnabled(True)
+
+        except Exception as e:
+            logging.exception("Error during file load")
+            self.status_label.setText("Error: See log in terminal")
+
+    # This runs EVERYTHING - meshing, centerline, surface curves, and display.
+    # Only used when loading a file and wanting to do all steps at once.
     def process_loaded_file(self):
         """Process the loaded file: generate centerline, surface curves, and display everything"""
         import logging
@@ -1913,44 +1972,254 @@ class MeshProcessorTab(QWidget):
         return argument if self.accept_stp else default
 
     def generate_centerline(self):
-        """Show marching record diagnostic view (only useful if data already exists)"""
-        import logging
         try:
-            # Check if data exists from file processing
-            if not hasattr(self, 'final_centerline') or self.final_centerline is None:
-                self.status_label.setText("Please load a file first.")
+            if not self.input_file:
+                self.status_label.setText("Status: No input file loaded!")
+                return 
+            
+            # Clear existing plots
+            self.plotter.clear()
+
+            # Read GUI parameters
+            self.trim_points = self.trim_points_input.value()
+            self.marching_record_step = self.marching_record_step_input.value()
+            self.feature_angle = self.feature_angle_input.value()
+            self.marching_record_step = self.marching_record_step_input.value()
+            self.centerline_s = self.centerline_s_input.value()
+            self.n_centerline_points = self.n_centerline_points_input.value()
+
+            # Extract end loops
+            self.status_label.setText("Status: Extracting end loops...")
+            self.loopA, self.loopB = self.helpers.extract_coil_end_loops(
+                self.surf_poly,
+                self.feature_angle
+            )
+            if self.loopA is None or self.loopB is None:
+                self.status_label.setText("Could not identify exactly two end loops. Try lowering feature angle or check mesh.")
                 return
             
-            # Clear and show only the marching record visualization (diagnostic view)
-            self.plotter.clear()
+            self.marching_record_forward = self.helpers.compute_marching_rings(
+                self.surf_poly, self.loopA, self.loopB
+            )
+
+            # Compute raw centerline
+            QApplication.processEvents()
+            logging.info("Computing forward centerline (loopA -> loopB)...")
+            
+            # If the center rings were not calculated previously, fall back on original code. Else, utilize it
+            if getattr(self, "marching_record_forward", None):
+                # This is the section that isn't done in compute_marching_rings that is done in 3d_mce. With this code, we have effectively copied 3d_mce, albeit in multiple parts
+                vertices = self.surf_poly.points
+                moving_sections = self.marching_record_forward
+                centers = []
+                # Append end A center
+                centers.append(self.loopA.points.mean(axis=0))
+                for section in moving_sections:
+                    if section:
+                        coords = np.array([vertices[v] for v in section])
+                        centers.append(coords.mean(axis=0))
+                # append end B center
+                centers.append(self.loopB.points.mean(axis=0))
+                self.raw_centerline_forward = np.vstack(centers)
+                self.marching_record_forward = moving_sections  # already computed
+            else:
+                # This should (almost) never be used. Regardless, it is here for streamlined processes.
+                self.status_label.setText("Status: Computing centerline (this may take a moment)...")
+                self.raw_centerline_forward, self.marching_record_forward = \
+                    self.helpers.compute_centerline_3d_mce(self.surf_poly, self.loopA, self.loopB)
+            if self.raw_centerline_forward is None:
+                logging.error("Failed to compute centerline.")
+                return
+            
+            # Smooth the raw centerline
+            QApplication.processEvents()
+            self.status_label.setText("Status: Smoothing centerline...")
+            self.smoothed_fwd = self.helpers.smooth_centerline(self.raw_centerline_forward, s=self.centerline_s, k=3, n_interp=self.n_centerline_points)
+
+            # Filter the raw centerline
+            # Trim points is utilized in both .stl and .stp - no need to remove
+            self.status_label.setText("Status: Trimming centerline...")
+            filtered_fwd = self.helpers.trim_end(self.smoothed_fwd, self.trim_points)
+
+            # Store and plot final centerline using trimmed data
+            self.status_label.setText("Status: Finalizing centerline...")
+            self.final_centerline = filtered_fwd
+            self.final_centerline_poly = self.helpers.create_polyline(
+                self.final_centerline,
+                closed=False
+            )
+
+            # Plot marching record for user confirmation
+            logging.info("Plotting marching record...")
+            self.status_label.setText("Status: Plotting marching record...")
             self.helpers.plot_marching_record(
                 self.surf_poly,
                 self.final_centerline,
                 self.loopA,
                 self.loopB,
                 self.marching_record_forward,
-                step=self.stp_check(self.marching_record_step_input.value(), 5),
+                step=self.stp_check(self.marching_record_step, 5),
                 plotter=self.plotter
             )
 
-            self.status_label.setText("Marching record diagnostic view shown.")
-            
-            # Enable surface curves button since centerline data exists
+            self.status_label.setText(
+                "Current marching record shown. Please confirm before continuing."
+            )
             self.btn_second_process.setEnabled(True)
 
         except Exception as e:
-            import logging
-            logging.exception("Error showing marching record")
+            logging.exception("Error during centerline generation")
             self.status_label.setText("Error: See log in terminal")
 
     def generate_surface_curves(self):
-        """Show full visualization (same as after file loading - for convenience)"""
-        if not hasattr(self, 'surface_curves') or self.surface_curves is None:
-            self.status_label.setText("Please load a file first.")
-            return
-        
-        # Re-run the same visualization that was shown after file processing
-        self.process_loaded_file()
+        try: 
+            if not self.input_file:
+                self.status_label.setText("No input file loaded!")
+                return
+             
+            self.plotter.clear()  # Clear previous scene if any
+
+            # Read GUI parameters
+            self.trim_points = self.trim_points_input.value()
+            self.centerline_s = self.centerline_s_input.value()
+            self.surfacecurves_s = self.surfacecurves_s_input.value()
+            self.loop_smoothing = self.loop_smoothing_input.value()
+            self.n_centerline_points = self.n_centerline_points_input.value()
+            self.n_loop_points = self.n_loop_points_input.value()
+            self.n_subset_points = self.n_subset_points_input.value()
+
+            self.status_label.setText("Status: Refining end loops...")
+            loopA_ordered = self.helpers.order_loop_points_pca(self.loopA.points)
+            refined_loopA_pts = self.helpers.refine_loop(self.pv.PolyData(loopA_ordered), n_points=self.stp_check(self.n_loop_points, 200), smoothing=self.stp_check(self.loop_smoothing, 0), spline_degree=3)
+            refined_loopA_poly = self.helpers.create_polyline(refined_loopA_pts, closed=True)
+
+            loopB_ordered = self.helpers.order_loop_points_pca(self.loopB.points)
+            refined_loopB_pts = self.helpers.refine_loop(self.pv.PolyData(loopB_ordered), n_points=self.stp_check(self.n_loop_points, 200), smoothing=self.stp_check(self.loop_smoothing, 0), spline_degree=3)
+            refined_loopB_poly = self.helpers.create_polyline(refined_loopB_pts, closed=True)
+
+            self.status_label.setText("Status: Building reference frames...")
+            centerpoint_A = self.final_centerline[0]
+            centerpoint_B = self.final_centerline[-1]
+            contours_A = self.helpers.generate_intermediate_contours(refined_loopA_pts, centerpoint_A, n_contours=5)
+            contours_B = self.helpers.generate_intermediate_contours(refined_loopB_pts, centerpoint_B, n_contours=5)
+
+            n_vecs, x_vecs, y_vecs = self.helpers.build_no_roll_frames(self.final_centerline)
+
+            self.status_label.setText("Status: Generating cross-sections...")
+            cross_sections_scaffold = []
+            total_sections = len(self.final_centerline)
+            
+            for i in range(total_sections):
+                # Update progress every 10% of sections
+                if i % max(1, total_sections // 10) == 0:
+                    progress = int((i / total_sections) * 100)
+                    self.status_label.setText(f"Status: Generating cross-sections... {progress}% complete")
+                    # Force GUI update during long computation
+                    QApplication.processEvents()
+                
+                if i == 0:
+                    cross_sections_scaffold.append(refined_loopA_pts)
+                    continue
+                elif i == len(self.final_centerline) - 1:
+                    cross_sections_scaffold.append(refined_loopB_pts)
+                    continue
+                center = self.final_centerline[i]
+                n_i = n_vecs[i]
+                x_i = x_vecs[i]
+                y_i = y_vecs[i]
+                sliced = self.helpers.slice_surface_at_point(self.surf_poly, center, n_i)
+                if sliced is None or sliced.n_points < 3:
+                    cross_sections_scaffold.append(None)
+                    continue
+                loops_sliced = sliced.split_bodies()
+                if isinstance(loops_sliced, self.pv.MultiBlock):
+                    slice_loop = max(loops_sliced, key=lambda lp: lp.length)
+                else:
+                    slice_loop = loops_sliced
+                if slice_loop is None or slice_loop.n_points < 3:
+                    cross_sections_scaffold.append(None)
+                    continue
+                raw_pts = slice_loop.points.copy()
+                angles_indices = []
+                for idx_pt, pt in enumerate(raw_pts):
+                    v = pt - center
+                    angle = np.arctan2(np.dot(v, y_i), np.dot(v, x_i))
+                    angles_indices.append((angle, idx_pt))
+                angles_indices.sort(key=lambda x: x[0])
+                sorted_pts = raw_pts[[idx for (_, idx) in angles_indices]]
+                sorted_pts = self.helpers.ensure_closed(sorted_pts)
+                refined_pts = self.helpers.refine_loop(self.pv.PolyData(sorted_pts), n_points=self.stp_check(self.n_loop_points, 200), smoothing=self.stp_check(self.loop_smoothing, 0), spline_degree=3)
+                cross_sections_scaffold.append(refined_pts)
+
+            self.status_label.setText("Status: Preparing surface curve generation...")
+            subset_points = self.helpers.select_evenly_spaced_subset(refined_loopA_pts, small_N=self.stp_check(self.n_subset_points, 20))
+            subset_thetas = self.helpers.compute_theta_for_subset_points(subset_points, centerpoint_A, x_vecs[0], y_vecs[0])
+            subset_r_initial = np.sqrt(np.sum((subset_points - centerpoint_A) ** 2, axis=1))
+
+            self.status_label.setText("Status: Generating surface curves...")
+            QApplication.processEvents()
+            surface_curves = self.helpers.generate_surface_curves(
+                cross_sections_scaffold=cross_sections_scaffold,
+                centerline_points=self.final_centerline,
+                n_vecs=n_vecs,
+                x_vecs=x_vecs,
+                y_vecs=y_vecs,
+                subset_thetas=subset_thetas,
+                subset_r_initial=subset_r_initial,
+                subset_points=subset_points
+            )
+
+            self.status_label.setText("Status: Smoothing surface curves...")
+            QApplication.processEvents()
+            trimmed_surface_curves = []
+            for curve in surface_curves:
+                trimmed = self.helpers.trim_end(curve, self.stp_check(self.trim_points, 0))
+                trimmed_surface_curves.append(trimmed)
+
+            smoothed_surface_curves = [self.helpers.smooth_surface_curve(curve, s=self.stp_check(self.surfacecurves_s, 0.2), k=3, n_interp=self.stp_check(self.n_centerline_points, 200)) for curve in trimmed_surface_curves]
+
+            # Store for potential export
+            self.surface_curves = smoothed_surface_curves
+
+            # Display everything
+            self.status_label.setText("Status: Rendering visualization...")
+            QApplication.processEvents()
+            self.plotter.add_mesh(self.surf_poly, color="lightblue", opacity=0.5, label="Surface Mesh")
+            self.plotter.add_mesh(self.final_centerline_poly, color="magenta", line_width=3, label="Centerline")
+            self.plotter.add_mesh(refined_loopA_poly, color="red", line_width=2, label="Loop A")
+            self.plotter.add_mesh(refined_loopB_poly, color="green", line_width=2, label="Loop B")
+
+            subset_poly = self.pv.PolyData(subset_points)
+            self.plotter.add_mesh(subset_poly, color="red", point_size=5, render_points_as_spheres=True, label="Subset Points")
+
+            for idx, curve in enumerate(smoothed_surface_curves):
+                poly = self.helpers.create_polyline(curve, closed=False)
+                self.plotter.add_mesh(poly, color="cyan", line_width=3, label=f"Surface Curve {idx}" if idx == 0 else None)
+
+            for i in range(0, len(cross_sections_scaffold), 5):
+                cs = cross_sections_scaffold[i]
+                if cs is None:
+                    continue
+                cs_poly = self.helpers.create_polyline(cs, closed=True)
+                self.plotter.add_mesh(cs_poly, color="blue", line_width=1, label=f"Cross Section {i}" if i == 0 else None)
+
+            for contour in contours_A + contours_B:
+                poly = self.helpers.create_polyline(contour, closed=True)
+                self.plotter.add_mesh(poly, color="yellow", line_width=2, opacity=0.8)
+
+            self.plotter.add_legend(bcolor="white")
+            self.plotter.reset_camera()
+                
+            self.status_label.setText("Status: Processing complete. Centerline and surface curves generated.")
+
+            # Store for export and enable button
+            self.trimmed_surface_curves = trimmed_surface_curves
+            if hasattr(self, "btn_export"):
+                self.btn_export.setEnabled(True)
+
+        except Exception as e:
+            logging.exception("Error during surface curve generation")
+            self.status_label.setText("Error: See log in terminal")
 
     def export_to_visualizer(self):
         from PyQt5.QtWidgets import QMessageBox
