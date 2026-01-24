@@ -1915,110 +1915,279 @@ class MeshProcessorTab(QWidget):
             self.status_label.setText("Status: File loaded and displayed")
             self.generate_centerline_btn.setEnabled(True)
 
+    # ------------------------- CENTERLINE CACHING AND COMPUTING ------------------------- #
+    def _ensure_centerline_cache(self):
+        """
+        Initialize cache containers used to avoid recomputing expensive steps.
+        Being called lazily to avoid unnecessary memory usage.
+        """
+        if not hasattr(self, "_cl_cache"):
+            self._cl_cache = {
+                "surf_poly_id": None,
+
+                # Stage 1: loops
+                "loops": None, # (loopA, loopB)
+                "loops_sig": None, # signature tuple
+
+                # Stage 2: marching + raw centerline
+                "marching_record_forward": None,
+                "raw_centerline_forward": None,
+                "raw_sig": None,
+
+                # Stage 3: post-processed centerline + polyline
+                "smoothed_fwd": None,
+                "final_centerline": None,
+                "final_centerline_poly": None,
+                "post_sig": None,
+            }
+
+    def _invalidate_centerline_cache(self, stage: str = "all"):
+        """
+        stage in {"all", "loops", "raw", "post"}.
+        Invalidates stage and all downstream stages.
+        """
+        self._ensure_centerline_cache()
+
+        if stage in ("all", "loops"):
+            self._cl_cache["loops"] = None
+            self._cl_cache["loops_sig"] = None
+            # downstream
+            stage = "raw"
+
+        if stage in ("all", "raw"):
+            self._cl_cache["marching_record_forward"] = None
+            self._cl_cache["raw_centerline_forward"] = None
+            self._cl_cache["raw_sig"] = None
+            # downstream
+            stage = "post"
+
+        if stage in ("all", "post"):
+            self._cl_cache["smoothed_fwd"] = None
+            self._cl_cache["final_centerline"] = None
+            self._cl_cache["final_centerline_poly"] = None
+            self._cl_cache["post_sig"] = None
+
+    def _read_centerline_params_from_ui(self):
+        """
+        Reads current GUI values into instance vars
+        """
+        self.trim_points = self.trim_points_input.value()
+        self.feature_angle = self.feature_angle_input.value()
+        self.marching_record_step = self.marching_record_step_input.value()
+        self.centerline_s = self.centerline_s_input.value()
+        self.n_centerline_points = self.n_centerline_points_input.value()
+
+    def _sync_cache_mesh_identity(self):
+        """
+        If the mesh changed (new file loaded), invalidate everything.
+        Call this for every surf_poly generation/load.
+        """
+        self._ensure_centerline_cache()
+        current_id = id(self.surf_poly) if self.surf_poly is not None else None
+        if self._cl_cache["surf_poly_id"] != current_id:
+            self._cl_cache["surf_poly_id"] = current_id
+            self._invalidate_centerline_cache("all")
+
+    def _compute_end_loops_cached(self):
+        """
+        Stage 1: end loop extraction.
+        Cached on (surf_poly_id, feature_angle).
+        """
+        self._ensure_centerline_cache()
+        sig = (self._cl_cache["surf_poly_id"], float(self.feature_angle))
+
+        if self._cl_cache["loops"] is not None and self._cl_cache["loops_sig"] == sig:
+            self.loopA, self.loopB = self._cl_cache["loops"]
+            return self.loopA, self.loopB
+
+        QApplication.processEvents()
+        self.status_label.setText("Status: Extracting end loops...")
+        loopA, loopB = self.helpers.extract_coil_end_loops(self.surf_poly, self.feature_angle)
+
+        if loopA is None or loopB is None:
+            self._invalidate_centerline_cache("loops")
+            return None, None
+
+        self.loopA, self.loopB = loopA, loopB
+        self._cl_cache["loops"] = (loopA, loopB)
+        self._cl_cache["loops_sig"] = sig
+
+        # downstream depends on loops
+        self._invalidate_centerline_cache("raw")
+        return loopA, loopB
+
+
+    def _compute_raw_centerline_cached(self):
+        """
+        Stage 2: marching rings + raw centerline.
+        Cached on (surf_poly_id, loops_sig).
+        """
+        self._ensure_centerline_cache()
+
+        # Ensure loops exist
+        loopA, loopB = self._compute_end_loops_cached()
+        if loopA is None or loopB is None:
+            return None, None
+
+        sig = (
+            self._cl_cache["surf_poly_id"],
+            self._cl_cache["loops_sig"],
+        )
+
+        if (
+            self._cl_cache["raw_centerline_forward"] is not None
+            and self._cl_cache["marching_record_forward"] is not None
+            and self._cl_cache["raw_sig"] == sig
+        ):
+            self.raw_centerline_forward = self._cl_cache["raw_centerline_forward"]
+            self.marching_record_forward = self._cl_cache["marching_record_forward"]
+            return self.raw_centerline_forward, self.marching_record_forward
+
+        # Compute marching rings
+        QApplication.processEvents()
+        self.status_label.setText("Status: Computing marching rings...")
+        moving_sections = self.helpers.compute_marching_rings(self.surf_poly, loopA, loopB)
+
+        # Compute raw centerline from marching rings (your existing logic)
+        QApplication.processEvents()
+        logging.info("Computing forward centerline (loopA -> loopB)...")
+        vertices = self.surf_poly.points
+        centers = []
+        centers.append(loopA.points.mean(axis=0))
+        for section in moving_sections:
+            if section:
+                coords = np.array([vertices[v] for v in section])
+                centers.append(coords.mean(axis=0))
+        centers.append(loopB.points.mean(axis=0))
+
+        raw_centerline = np.vstack(centers) if centers else None
+        if raw_centerline is None:
+            logging.error("Failed to compute raw centerline from marching rings.")
+            self._invalidate_centerline_cache("raw")
+            return None, None
+
+        self.raw_centerline_forward = raw_centerline
+        self.marching_record_forward = moving_sections
+
+        self._cl_cache["raw_centerline_forward"] = raw_centerline
+        self._cl_cache["marching_record_forward"] = moving_sections
+        self._cl_cache["raw_sig"] = sig
+
+        # downstream depends on raw
+        self._invalidate_centerline_cache("post")
+        return raw_centerline, moving_sections
+
+    def _postprocess_and_plot_centerline_cached(self):
+        """
+        Stage 3: smooth + trim + polyline + plotting.
+        Cached on (raw_sig, trim_points, centerline_s, n_centerline_points, marching_record_step).
+        """
+        self._ensure_centerline_cache()
+
+        raw_centerline, marching_record = self._compute_raw_centerline_cached()
+        if raw_centerline is None or marching_record is None:
+            return False
+
+        sig = (
+            self._cl_cache["raw_sig"],
+            int(self.trim_points),
+            float(self.centerline_s),
+            int(self.n_centerline_points),
+            int(self.marching_record_step),
+        )
+
+        # Even if post-processing is cached, you might still want to re-plot if the user cleared the view.
+        # We'll treat cache as including "final results", then always do plot at the end.
+        if self._cl_cache["final_centerline"] is None or self._cl_cache["post_sig"] != sig:
+            # Smooth
+            QApplication.processEvents()
+            self.status_label.setText("Status: Smoothing centerline...")
+            smoothed = self.helpers.smooth_centerline(
+                raw_centerline,
+                s=self.stp_check(self.centerline_s, 0.001),
+                k=3,
+                n_interp=self.stp_check(self.n_centerline_points, 500),
+            )
+
+            # Trim
+            QApplication.processEvents()
+            self.status_label.setText("Status: Trimming centerline...")
+            filtered = self.helpers.trim_end(smoothed, self.trim_points)
+
+            # Polyline
+            QApplication.processEvents()
+            self.status_label.setText("Status: Finalizing centerline...")
+            final_poly = self.helpers.create_polyline(filtered, closed=False)
+
+            # Store on instance
+            self.smoothed_fwd = smoothed
+            self.final_centerline = filtered
+            self.final_centerline_poly = final_poly
+
+            # Cache
+            self._cl_cache["smoothed_fwd"] = smoothed
+            self._cl_cache["final_centerline"] = filtered
+            self._cl_cache["final_centerline_poly"] = final_poly
+            self._cl_cache["post_sig"] = sig
+        else:
+            # Restore cached post outputs
+            self.smoothed_fwd = self._cl_cache["smoothed_fwd"]
+            self.final_centerline = self._cl_cache["final_centerline"]
+            self.final_centerline_poly = self._cl_cache["final_centerline_poly"]
+
+        # Plot results
+        QApplication.processEvents()
+        self.status_label.setText("Status: Plotting marching record...")
+        logging.info("Plotting marching record...")
+
+        self.helpers.plot_marching_record(
+            self.surf_poly,
+            self.final_centerline,
+            self.loopA,
+            self.loopB,
+            self.marching_record_forward,
+            step=self.stp_check(self.marching_record_step, 5),
+            plotter=self.plotter,
+        )
+
+        self.status_label.setText("Current marching record shown. Please confirm before continuing.")
+        return True
 
     def generate_centerline(self):
+        """
+        Public entry point. Runs the pipeline but only recomputes what is invalid.
+        Changing trim_points / smoothing / n_centerline_points will only redo post-processing.
+        """
         try:
-            if not self.input_file:
+            if not self.input_file or self.surf_poly is None:
                 self.status_label.setText("Status: No input file loaded!")
-                return 
-            
+                return
+
             # Clear existing plots
             self.plotter.clear()
 
-            # Read GUI parameters
-            self.trim_points = self.trim_points_input.value()
-            self.marching_record_step = self.marching_record_step_input.value()
-            self.feature_angle = self.feature_angle_input.value()
-            self.marching_record_step = self.marching_record_step_input.value()
-            self.centerline_s = self.centerline_s_input.value()
-            self.n_centerline_points = self.n_centerline_points_input.value()
+            # Read GUI parameters into instance vars
+            self._read_centerline_params_from_ui()
 
-            # Extract end loops
-            QApplication.processEvents()
-            self.status_label.setText("Status: Extracting end loops...")
-            self.loopA, self.loopB = self.helpers.extract_coil_end_loops(
-                self.surf_poly,
-                self.feature_angle
-            )
-            if self.loopA is None or self.loopB is None:
-                self.status_label.setText("Could not identify exactly two end loops. Try lowering feature angle or check mesh.")
+            # Detect mesh change and invalidate caches if needed
+            self._sync_cache_mesh_identity()
+
+            # Run pipeline (cached)
+            ok = self._postprocess_and_plot_centerline_cached()
+            if not ok:
+                self.status_label.setText(
+                    "Could not identify exactly two end loops. Try lowering feature angle or check mesh."
+                )
                 return
-            
-            QApplication.processEvents()
-            self.status_label.setText("Status: Computing marching rings...")
-            self.marching_record_forward = self.helpers.compute_marching_rings(
-                self.surf_poly, self.loopA, self.loopB
-            )
 
-            # Compute raw centerline
-            QApplication.processEvents()
-            logging.info("Computing forward centerline (loopA -> loopB)...")
-            
-            # If the center rings were not calculated previously, fall back on original code. Else, utilize it
-            if getattr(self, "marching_record_forward", None):
-                # This is the section that isn't done in compute_marching_rings that is done in 3d_mce. With this code, we have effectively copied 3d_mce, albeit in multiple parts
-                vertices = self.surf_poly.points
-                moving_sections = self.marching_record_forward
-                centers = []
-                # Append end A center
-                centers.append(self.loopA.points.mean(axis=0))
-                for section in moving_sections:
-                    if section:
-                        coords = np.array([vertices[v] for v in section])
-                        centers.append(coords.mean(axis=0))
-                # append end B center
-                centers.append(self.loopB.points.mean(axis=0))
-                self.raw_centerline_forward = np.vstack(centers)
-                self.marching_record_forward = moving_sections  # already computed
-            else:
-                # This should (almost) never be used. Regardless, it is here for streamlined processes.
-                self.status_label.setText("Status: Computing centerline (this may take a moment)...")
-                self.raw_centerline_forward, self.marching_record_forward = \
-                    self.helpers.compute_centerline_3d_mce(self.surf_poly, self.loopA, self.loopB)
-            if self.raw_centerline_forward is None:
-                logging.error("Failed to compute centerline.")
-                return
-            
-            # Smooth the raw centerline
-            QApplication.processEvents()
-            self.status_label.setText("Status: Smoothing centerline...")
-            self.smoothed_fwd = self.helpers.smooth_centerline(self.raw_centerline_forward, s=self.stp_check(self.centerline_s, 0.001), k=3, n_interp=self.stp_check(self.n_centerline_points, 500))
-
-            # Filter the raw centerline
-            # Trim points is utilized in both .stl and .stp - no need to stp check
-            self.status_label.setText("Status: Trimming centerline...")
-            filtered_fwd = self.helpers.trim_end(self.smoothed_fwd, self.trim_points)
-
-            # Store and plot final centerline using trimmed data
-            self.status_label.setText("Status: Finalizing centerline...")
-            self.final_centerline = filtered_fwd
-            self.final_centerline_poly = self.helpers.create_polyline(
-                self.final_centerline,
-                closed=False
-            )
-
-            # Plot marching record for user confirmation
-            logging.info("Plotting marching record...")
-            self.status_label.setText("Status: Plotting marching record...")
-            self.helpers.plot_marching_record(
-                self.surf_poly,
-                self.final_centerline,
-                self.loopA,
-                self.loopB,
-                self.marching_record_forward,
-                step=self.stp_check(self.marching_record_step, 5),
-                plotter=self.plotter
-            )
-
-            self.status_label.setText(
-                "Current marching record shown. Please confirm before continuing."
-            )
+            # Enable downstream workflow
             self.surface_curves_btn.setEnabled(True)
 
-        except Exception as e:
+        except Exception:
             logging.exception("Error during centerline generation")
             self.status_label.setText("Error: See log in terminal")
 
+    # ---------------------- SURFACE CURVES FUNCTIONALITY ---------------------- #
     def generate_surface_curves(self):
         try: 
             if not self.input_file:
@@ -2117,6 +2286,7 @@ class MeshProcessorTab(QWidget):
                 subset_points=subset_points
             )
 
+            # Both trim and smooth 
             self.status_label.setText("Status: Smoothing surface curves...")
             QApplication.processEvents()
             trimmed_surface_curves = []
