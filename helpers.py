@@ -206,31 +206,201 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
 # Centerline and End Loop Extraction Functions
 # -----------------------------------------------------------------------------
 
-def extract_coil_end_loops(surf_poly, angle_threshold=75.0):
-    edges_poly = surf_poly.extract_feature_edges(
+def _pca_axis(points: np.ndarray) -> np.ndarray:
+    """Return principal axis (unit) of a point cloud."""
+    pts = points - points.mean(axis=0)
+    # SVD on covariance
+    _, _, vt = np.linalg.svd(pts, full_matrices=False)
+    axis = vt[0]
+    axis = axis / np.linalg.norm(axis)
+    return axis
+
+def _component_perimeter(ds) -> float:
+    """
+    Robustly estimate 'perimeter'/length for a loop-like dataset.
+    Works for PolyData and UnstructuredGrid.
+    """
+    if ds is None or ds.n_points == 0:
+        return 0.0
+
+    # Coerce to PolyData
+    poly = ds if isinstance(ds, pv.PolyData) else ds.extract_surface()
+
+    if poly is None or poly.n_points == 0 or poly.n_cells == 0:
+        return 0.0
+
+    # Ensure we have line-like geometry; if not, fall back to edges
+    # (Some outputs are surfaces or mixed cell types.)
+    try:
+        has_lines = poly.lines is not None and len(poly.lines) > 0
+    except Exception:
+        has_lines = False
+
+    edge_poly = poly if has_lines else poly.extract_all_edges()
+
+    if edge_poly is None or edge_poly.n_cells == 0:
+        return 0.0
+
+    sizes = edge_poly.compute_cell_sizes(length=True)
+    # 'Length' is the per-cell length; sum it up
+    return float(np.sum(sizes["Length"]))
+
+
+def _pick_best_two_loops(loops: list[pv.PolyData], axis: np.ndarray) -> tuple[pv.PolyData, pv.PolyData] | tuple[None, None]:
+    """
+    Choose the best two loops from many.
+    Heuristic:
+      - Prefer large perimeter loops (coil ends are typically the largest boundaries)
+      - Among top candidates, prefer the pair with max separation along the principal axis
+    """
+    if len(loops) < 2:
+        return None, None
+
+    # Score by perimeter first
+    scored = [(loop, _component_perimeter(loop)) for loop in loops]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Keep a small candidate set since O(n^2) search follows
+    candidates = [loop for loop, perim in scored[: min(10, len(scored))]]
+
+    # Compute centroids projected on axis and choose farthest pair
+    projs = []
+    for loop in candidates:
+        c = loop.points.mean(axis=0)
+        projs.append(float(np.dot(c, axis)))
+
+    best = None
+    best_dist = -1.0
+    for i in range(len(candidates)):
+        for j in range(i + 1, len(candidates)):
+            d = abs(projs[i] - projs[j])
+            if d > best_dist:
+                best_dist = d
+                best = (candidates[i], candidates[j])
+
+    if best is None:
+        return None, None
+
+    return best[0], best[1]
+
+def _split_components(ds) -> list[pv.PolyData]:
+    if ds is None or ds.n_points == 0:
+        return []
+    mb = ds.split_bodies()
+    blocks = []
+    if isinstance(mb, pv.MultiBlock):
+        for i in range(len(mb)):
+            b = mb[i]
+            if b is None or b.n_points == 0:
+                continue
+            blocks.append(b if isinstance(b, pv.PolyData) else b.extract_surface())
+    else:
+        if mb is not None and mb.n_points > 0:
+            blocks.append(mb if isinstance(mb, pv.PolyData) else mb.extract_surface())
+    return blocks
+
+def _slice_loops_near_ends(surf_poly: pv.PolyData, axis: np.ndarray, frac: float = 0.01) -> tuple[pv.PolyData, pv.PolyData] | tuple[None, None]:
+    """
+    Fallback for watertight meshes (no boundary edges).
+    Slice near the two extremes along the principal axis and extract intersection polylines.
+    """
+    pts = surf_poly.points
+    t = pts @ axis
+    tmin, tmax = float(t.min()), float(t.max())
+    span = tmax - tmin
+    if span <= 0:
+        return None, None
+
+    # pick planes slightly inboard from extremes (to avoid numerical issues)
+    d = max(frac * span, 1e-6)
+    o1 = axis * (tmin + d)
+    o2 = axis * (tmax - d)
+
+    # Slice returns polylines where mesh intersects the plane
+    s1 = surf_poly.slice(normal=axis, origin=o1).clean(tolerance=1e-6)
+    s2 = surf_poly.slice(normal=axis, origin=o2).clean(tolerance=1e-6)
+
+    # Sometimes slice yields multiple polylines; pick the largest by perimeter
+    c1 = _split_components(s1)
+    c2 = _split_components(s2)
+    if not c1 or not c2:
+        return None, None
+
+    c1.sort(key=_component_perimeter, reverse=True)
+    c2.sort(key=_component_perimeter, reverse=True)
+    return c1[0], c2[0]
+
+def extract_coil_end_loops(
+    surf_poly: pv.PolyData,
+    angle_threshold: float = 75.0,
+    clean_tolerance: float = 1e-6,
+    prefer_boundary_only: bool = True,
+) -> tuple[pv.PolyData, pv.PolyData]:
+    """
+    Improved end-loop extraction:
+      1) Try boundary edges only (recommended for open coils)
+      2) Clean/weld edges to reduce fragmentation
+      3) If >2 components, select best two via perimeter + separation along PCA axis
+      4) If no boundary edges (watertight), fallback to slicing near ends
+
+    Raises ValueError with actionable info instead of blocking plotter.show().
+    """
+    if surf_poly is None or surf_poly.n_points == 0:
+        raise ValueError("surf_poly is empty.")
+
+    axis = _pca_axis(surf_poly.points)
+
+    # --- Pass 1: Boundary edges only ---
+    if prefer_boundary_only:
+        edges = surf_poly.extract_feature_edges(
+            boundary_edges=True,
+            feature_edges=False,
+            manifold_edges=False,
+            feature_angle=angle_threshold
+        ).clean(tolerance=clean_tolerance)
+
+        loops = _split_components(edges)
+
+        if len(loops) == 2:
+            return loops[0], loops[1]
+
+        if len(loops) > 2:
+            loopA, loopB = _pick_best_two_loops(loops, axis)
+            if loopA is not None and loopB is not None:
+                return loopA, loopB
+
+        # If prefer_boundary_only is True but we didn't find two loops, continue to Pass 2.
+
+    # --- Pass 2: Boundary + feature edges (to catch fragmented ends) ---
+    edges = surf_poly.extract_feature_edges(
         boundary_edges=True,
         feature_edges=True,
         manifold_edges=False,
         feature_angle=angle_threshold
+    ).clean(tolerance=clean_tolerance)
+
+    loops = _split_components(edges)
+
+    if len(loops) == 2:
+        return loops[0], loops[1]
+
+    if len(loops) > 2:
+        loopA, loopB = _pick_best_two_loops(loops, axis)
+        if loopA is not None and loopB is not None:
+            return loopA, loopB
+
+    # --- Pass 3 fallback: watertight mesh or bad boundaries -> slice near ends ---
+    loopA, loopB = _slice_loops_near_ends(surf_poly, axis)
+    if loopA is not None and loopB is not None:
+        return loopA, loopB
+
+    raise ValueError(
+        "Could not robustly identify two end loops. "
+        "Try: (1) repairing STL to ensure open ends, "
+        "(2) increasing mesh resolution, "
+        "(3) adjusting angle_threshold, "
+        "(4) verify the mesh is not watertight if you expect open ends."
     )
-    split_edges = edges_poly.split_bodies()
-    if isinstance(split_edges, pv.MultiBlock):
-        loops = [split_edges[i] for i in range(len(split_edges))]
-    else:
-        loops = [split_edges]
-    n_loops = len(loops)
-    if n_loops != 2:
-        plotter = pv.Plotter()
-        plotter.add_mesh(surf_poly, color="blue", opacity=0.5, label="Surface Mesh")
-        for i, loop in enumerate(loops):
-            plotter.add_mesh(loop, color="red", line_width=4, label=f"Loop {i}")
-        plotter.show(title="Error: Surface Mesh + Detected Loops")
-        raise ValueError(
-            f"Expected exactly 2 end loops, but found {n_loops}. "
-            "Please check your geometry or angle_threshold."
-        )
-    loopA, loopB = loops
-    return loopA, loopB
 
 def split_connected_loops(poly: pv.PolyData) -> list[pv.PolyData]:
     """
@@ -261,11 +431,11 @@ def split_connected_loops(poly: pv.PolyData) -> list[pv.PolyData]:
 
         return loops
 
-    # Fallback: point-based connectivity (some PyVista versions do this for polylines)
+    # Fallback: point-based connectivity
     labeled = poly.connectivity(point_data=True)
     rid_point = labeled.point_data.get('RegionId', None)
     if rid_point is None:
-        # Last resort: return the input as single component (won't crash)
+        # Last resort: return the input as single component
         return [poly]
 
     rids = np.unique(rid_point)

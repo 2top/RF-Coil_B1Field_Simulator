@@ -1524,7 +1524,7 @@ class MeshProcessorTab(QWidget):
             0.0001, 1.0, 0.001, self.centerline_s,
             lambda val: setattr(self, "centerline_s", val),
             tooltip="Centerline smoothing parameter",
-            enabled=False,
+            enabled=True,
         )
         center_layout.addRow(QLabel("Centerline Smooth (s)"), self.centerline_s_input)
 
@@ -1683,7 +1683,7 @@ class MeshProcessorTab(QWidget):
         self.max_element_size_factor_input.setEnabled(False)
         self.trim_points_input.setEnabled(True)
         self.feature_angle_input.setEnabled(True)
-        self.centerline_s_input.setEnabled(False)
+        self.centerline_s_input.setEnabled(True)
         self.surfacecurves_s_input.setEnabled(False)
         self.n_centerline_points_input.setEnabled(False)
         self.n_loop_points_input.setEnabled(False)
@@ -2096,15 +2096,13 @@ class MeshProcessorTab(QWidget):
             int(self.marching_record_step),
         )
 
-        # Even if post-processing is cached, you might still want to re-plot if the user cleared the view.
-        # We'll treat cache as including "final results", then always do plot at the end.
         if self._cl_cache["final_centerline"] is None or self._cl_cache["post_sig"] != sig:
             # Smooth
             QApplication.processEvents()
             self.status_label.setText("Status: Smoothing centerline...")
             smoothed = self.helpers.smooth_centerline(
                 raw_centerline,
-                s=self.stp_check(self.centerline_s, 0.001),
+                s=self.centerline_s,
                 k=3,
                 n_interp=self.stp_check(self.n_centerline_points, 500),
             )
