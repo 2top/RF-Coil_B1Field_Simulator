@@ -185,6 +185,7 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
         except Exception as e:
             logging.error(f"Failed to load STL file '{input_filename}': {e}")
     elif ext in [".stp", ".step"]:
+        mesh_step_file(input_filename, mesh_filename, element_size, size_factor)
         grid_or_poly = load_msh_as_pv_mesh(mesh_filename)
         if isinstance(grid_or_poly, pv.UnstructuredGrid):
             surf_poly = grid_or_poly.extract_surface()
