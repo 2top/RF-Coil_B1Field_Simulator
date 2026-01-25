@@ -230,7 +230,6 @@ def _component_perimeter(ds) -> float:
         return 0.0
 
     # Ensure we have line-like geometry; if not, fall back to edges
-    # (Some outputs are surfaces or mixed cell types.)
     try:
         has_lines = poly.lines is not None and len(poly.lines) > 0
     except Exception:
@@ -245,43 +244,40 @@ def _component_perimeter(ds) -> float:
     # 'Length' is the per-cell length; sum it up
     return float(np.sum(sizes["Length"]))
 
-
-def _pick_best_two_loops(loops: list[pv.PolyData], axis: np.ndarray) -> tuple[pv.PolyData, pv.PolyData] | tuple[None, None]:
-    """
-    Choose the best two loops from many.
-    Heuristic:
-      - Prefer large perimeter loops (coil ends are typically the largest boundaries)
-      - Among top candidates, prefer the pair with max separation along the principal axis
-    """
+def _pick_best_two_loops(loops: list[pv.PolyData], axis: np.ndarray):
     if len(loops) < 2:
         return None, None
 
-    # Score by perimeter first
-    scored = [(loop, _component_perimeter(loop)) for loop in loops]
+    # Compute perimeter/length scores
+    scored = [(lp, _component_perimeter(lp), lp.n_points) for lp in loops]
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    # Keep a small candidate set since O(n^2) search follows
-    candidates = [loop for loop, perim in scored[: min(10, len(scored))]]
+    # Reject tiny components (This may want to have tunable thresholds... haven't decided yet)
+    MIN_PTS = 10          # keep loops with at least 10 points
+    MIN_FRAC = 0.50       # keep loops with at least 50% of the max length
 
-    # Compute centroids projected on axis and choose farthest pair
-    projs = []
-    for loop in candidates:
-        c = loop.points.mean(axis=0)
-        projs.append(float(np.dot(c, axis)))
+    max_len = scored[0][1] if scored else 0.0
+    filtered = [(lp, ln) for (lp, ln, npts) in scored if npts >= MIN_PTS and ln >= MIN_FRAC * max_len]
 
-    best = None
+    # If filtering leaves fewer than 2, fall back to the top-2 by length
+    if len(filtered) < 2:
+        top2 = [scored[i][0] for i in range(min(2, len(scored)))]
+        return (top2[0], top2[1]) if len(top2) == 2 else (None, None)
+
+    # From filtered candidates, choose the two farthest apart along axis
+    candidates = [lp for lp, _ in filtered[: min(10, len(filtered))]]
+    projs = [float(np.dot(lp.points.mean(axis=0), axis)) for lp in candidates]
+
+    best_pair = None
     best_dist = -1.0
     for i in range(len(candidates)):
         for j in range(i + 1, len(candidates)):
             d = abs(projs[i] - projs[j])
             if d > best_dist:
                 best_dist = d
-                best = (candidates[i], candidates[j])
+                best_pair = (candidates[i], candidates[j])
 
-    if best is None:
-        return None, None
-
-    return best[0], best[1]
+    return best_pair if best_pair else (None, None)
 
 def _split_components(ds) -> list[pv.PolyData]:
     if ds is None or ds.n_points == 0:
@@ -381,6 +377,10 @@ def extract_coil_end_loops(
 
     loops = _split_components(edges)
 
+    # This should show available loops. The program should be using the best two below.
+    # for i, lp in enumerate(loops):
+    #     print(f"[DEBUG] loop {i}: n_points={lp.n_points}, n_cells={lp.n_cells}")
+
     if len(loops) == 2:
         return loops[0], loops[1]
 
@@ -447,13 +447,54 @@ def split_connected_loops(poly: pv.PolyData) -> list[pv.PolyData]:
 
     return loops
 
+def map_poly_points_to_surface_indices(
+    loop_poly: pv.PolyData,
+    surf_poly: pv.PolyData,
+    tol: float | None = None
+) -> set[int]:
+    """
+    Map loop_poly points to nearest vertex indices in surf_poly, with tolerance.
+    This replaces brittle exact coordinate matching.
+
+    tol: maximum allowed distance from a loop point to its mapped surface vertex.
+         If None, uses a scale-aware default based on surf_poly bbox diagonal.
+    """
+    if loop_poly is None or loop_poly.n_points == 0:
+        return set()
+    if surf_poly is None or surf_poly.n_points == 0:
+        return set()
+
+    surf_pts = np.asarray(surf_poly.points)
+    loop_pts = np.asarray(loop_poly.points)
+
+    if tol is None:
+        xmin, xmax, ymin, ymax, zmin, zmax = surf_poly.bounds
+        diag = float(np.linalg.norm([xmax - xmin, ymax - ymin, zmax - zmin]))
+        tol = max(1e-6, 1e-4 * diag)  # adjust to 1e-3*diag if still failing
+
+    # Fast path if SciPy exists
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(surf_pts)
+        dists, idxs = tree.query(loop_pts, k=1)
+        # print(f"[DEBUG] map distances: min={dists.min():.3e} med={np.median(dists):.3e} max={dists.max():.3e} tol={tol:.3e}") # If tol of mid and max are >> tol, then mapping is failing.
+        return {int(i) for d, i in zip(dists, idxs) if d <= tol}
+    except Exception:
+        # Fallback using PyVista's closest point
+        out = set()
+        for p in loop_pts:
+            i = int(surf_poly.find_closest_point(p))
+            if float(np.linalg.norm(surf_pts[i] - p)) <= tol:
+                out.add(i)
+        return out
+
+
 def compute_marching_rings(surf_poly: pv.PolyData,
                            loopA: pv.PolyData,
                            loopB: pv.PolyData) -> list[set]:
     """
-    Return the marching_record (list of vertex-index sets) without
-    collapsing them into center points. Essentially the same marching
-    loop from compute_centerline_3d_mce, but stops after collecting rings.
+    Return marching_record (list of vertex-index sets) without collapsing
+    them into center points.
     """
     pv_faces = surf_poly.faces.reshape((-1, 4))[:, 1:]
     vertices = surf_poly.points
@@ -461,8 +502,12 @@ def compute_marching_rings(surf_poly: pv.PolyData,
     loopA_plane_centroid, loopA_plane_normal = compute_best_fit_plane(loopA.points)
     loopB_plane_centroid, loopB_plane_normal = compute_best_fit_plane(loopB.points)
 
-    endA_vertex_indices = select_vertices_near_plane(surf_poly, loopA_plane_centroid, loopA_plane_normal, TOL)
-    endB_vertex_indices = select_vertices_near_plane(surf_poly, loopB_plane_centroid, loopB_plane_normal, TOL)
+    endA_vertex_indices = select_vertices_near_plane(
+        surf_poly, loopA_plane_centroid, loopA_plane_normal, TOL
+    )
+    endB_vertex_indices = select_vertices_near_plane(
+        surf_poly, loopB_plane_centroid, loopB_plane_normal, TOL
+    )
 
     all_vertex_indices = set(range(len(vertices)))
     inactive_vertex_indices = set(endA_vertex_indices).union(set(endB_vertex_indices))
@@ -473,14 +518,24 @@ def compute_marching_rings(surf_poly: pv.PolyData,
         if any(v in active_vertex_indices for v in face):
             pv_faces_set.add(f_idx)
 
-    # Build initial moving/reference sets using coordinates that exist in surf_poly
-    def _find_indices(poly: pv.PolyData, all_pts: np.ndarray) -> set:
-        coord_to_index = {tuple(pt): i for i, pt in enumerate(all_pts)}
-        idxs = [coord_to_index.get(tuple(pt), -1) for pt in poly.points]
-        return {i for i in idxs if i >= 0}
+    # --- FIX: robust mapping instead of exact tuple equality ---
+    V_mov = map_poly_points_to_surface_indices(loopA, surf_poly, tol=None)
+    V_ref = map_poly_points_to_surface_indices(loopB, surf_poly, tol=None)
 
-    V_mov = _find_indices(loopA, vertices)
-    V_ref = _find_indices(loopB, vertices)
+    # This should tell you whether mapping is working. If the numbers are extremely small (i.e. loops aren't being found), that may be why something fails later.
+    # print(
+    #     f"[DEBUG] marching rings mapping:"
+    #     f" V_mov={len(V_mov)}"
+    #     f" V_ref={len(V_ref)}"
+    # )
+
+    if len(V_mov) == 0 or len(V_ref) == 0:
+        raise ValueError(
+            f"Could not map loop points to surface vertices "
+            f"(V_mov={len(V_mov)}, V_ref={len(V_ref)}). "
+            "This is typically caused by edge cleaning/feature extraction altering point coordinates. "
+            "Increase mapping tolerance or reduce clean_tolerance / prefer boundary-only loops."
+        )
 
     def _external_edges_and_vertices(faces_subset: set):
         e2f = defaultdict(list)
@@ -491,7 +546,7 @@ def compute_marching_rings(surf_poly: pv.PolyData,
                          tuple(sorted((tri[2], tri[0])))]:
                 e2f[edge].append(f_idx)
         E_ext = [e for e, flist in e2f.items() if len(flist) == 1]
-        V_ext = set([v for e in E_ext for v in e])
+        V_ext = {v for e in E_ext for v in e}
         return E_ext, V_ext
 
     visited = set()
@@ -500,18 +555,25 @@ def compute_marching_rings(surf_poly: pv.PolyData,
 
     while True:
         visited |= current_moving
-        new_active_faces = {f_idx for f_idx in pv_faces_set
-                            if not any(v in visited for v in pv_faces[f_idx])}
+        new_active_faces = {
+            f_idx for f_idx in pv_faces_set
+            if not any(v in visited for v in pv_faces[f_idx])
+        }
         if not new_active_faces:
             break
+
         _, V_ext_new = _external_edges_and_vertices(new_active_faces)
+
+        # Stop condition now works because V_ref is meaningful
         new_moving = V_ext_new - V_ref
         if not new_moving:
             break
+
         marching_record.append(new_moving.copy())
         current_moving = new_moving
 
     return marching_record
+
 
 
 def vertex_set_to_points(surf_poly: pv.PolyData, vset: set) -> np.ndarray:

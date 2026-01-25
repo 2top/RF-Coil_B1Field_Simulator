@@ -1786,8 +1786,6 @@ class MeshProcessorTab(QWidget):
 
         self.element_size = self.element_size_input.value()
         self.max_element_size_factor = self.max_element_size_factor_input.value()
-        # This currently needs to be set before load file is called... will want to change this in the future.
-        # self.msh_file = self.mesh_name_input.text().strip() or "generated_mesh.msh"
         
         if self.accept_stl:
             file_filter = "STL Files (*.stl)"
