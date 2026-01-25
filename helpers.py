@@ -307,7 +307,7 @@ def _slice_loops_near_ends(surf_poly: pv.PolyData, axis: np.ndarray, frac: float
     if span <= 0:
         return None, None
 
-    # pick planes slightly inboard from extremes (to avoid numerical issues)
+    # pick planes slightly inboard from extremes
     d = max(frac * span, 1e-6)
     o1 = axis * (tmin + d)
     o2 = axis * (tmax - d)
@@ -333,13 +333,11 @@ def extract_coil_end_loops(
     prefer_boundary_only: bool = True,
 ) -> tuple[pv.PolyData, pv.PolyData]:
     """
-    Improved end-loop extraction:
+    New and Improved end-loop extraction!:
       1) Try boundary edges only (recommended for open coils)
       2) Clean/weld edges to reduce fragmentation
       3) If >2 components, select best two via perimeter + separation along PCA axis
       4) If no boundary edges (watertight), fallback to slicing near ends
-
-    Raises ValueError with actionable info instead of blocking plotter.show().
     """
     if surf_poly is None or surf_poly.n_points == 0:
         raise ValueError("surf_poly is empty.")
@@ -395,7 +393,7 @@ def extract_coil_end_loops(
         return loopA, loopB
 
     raise ValueError(
-        "Could not robustly identify two end loops. "
+        "Could not identify two end loops. "
         "Try: (1) repairing STL to ensure open ends, "
         "(2) increasing mesh resolution, "
         "(3) adjusting angle_threshold, "
@@ -404,7 +402,7 @@ def extract_coil_end_loops(
 
 def split_connected_loops(poly: pv.PolyData) -> list[pv.PolyData]:
     """
-    Robustly split a (polyline) PolyData into connected components (loops/curves),
+    Split a (polyline) PolyData into connected components (loops/curves),
     tolerating PyVista versions where RegionId may be in point_data instead of cell_data.
     Returns a list of PolyData, one per connected component.
     """
@@ -518,7 +516,6 @@ def compute_marching_rings(surf_poly: pv.PolyData,
         if any(v in active_vertex_indices for v in face):
             pv_faces_set.add(f_idx)
 
-    # --- FIX: robust mapping instead of exact tuple equality ---
     V_mov = map_poly_points_to_surface_indices(loopA, surf_poly, tol=None)
     V_ref = map_poly_points_to_surface_indices(loopB, surf_poly, tol=None)
 
@@ -564,7 +561,6 @@ def compute_marching_rings(surf_poly: pv.PolyData,
 
         _, V_ext_new = _external_edges_and_vertices(new_active_faces)
 
-        # Stop condition now works because V_ref is meaningful
         new_moving = V_ext_new - V_ref
         if not new_moving:
             break
@@ -573,8 +569,6 @@ def compute_marching_rings(surf_poly: pv.PolyData,
         current_moving = new_moving
 
     return marching_record
-
-
 
 def vertex_set_to_points(surf_poly: pv.PolyData, vset: set) -> np.ndarray:
     """

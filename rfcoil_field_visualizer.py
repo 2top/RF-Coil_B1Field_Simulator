@@ -1492,6 +1492,12 @@ class MeshProcessorTab(QWidget):
             self.btn_with_tooltip("Load File", self.load_file, "Load a .stp, .stl, or .msh file"),
         )
 
+        # This may want to be a consistent button on all tabs... for now, just here
+        file_layout.addRow(
+            self._spacer_label(),
+            self.btn_with_tooltip("Clean Plot", self.clear_plot, "Clear all meshes from the plotter"),
+        )
+
         self.element_size_input = self._create_doublespinbox(
             0.001, 10.0, 0.01, self.element_size,
             lambda val: setattr(self, "element_size", val),
@@ -1580,6 +1586,7 @@ class MeshProcessorTab(QWidget):
         self.n_loop_points_input = self._create_spinbox(
             50, 500, 1, self.n_loop_points,
             lambda val: setattr(self, "n_loop_points", val),
+            tooltip="Number of points in each loop",
             enabled=False,
         )
         sc_layout.addRow(QLabel("Loop Points"), self.n_loop_points_input)
@@ -1587,6 +1594,7 @@ class MeshProcessorTab(QWidget):
         self.n_subset_points_input = self._create_spinbox(
             10, 100, 1, self.n_subset_points,
             lambda val: setattr(self, "n_subset_points", val),
+            tooltip="Number of subset points",
             enabled=False,
         )
         sc_layout.addRow(QLabel("Subset Points"), self.n_subset_points_input)
