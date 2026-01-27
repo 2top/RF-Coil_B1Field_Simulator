@@ -1986,7 +1986,6 @@ class MeshProcessorTab(QWidget):
     def _sync_cache_mesh_identity(self):
         """
         If the mesh changed (new file loaded), invalidate everything.
-        Call this for every surf_poly generation/load.
         """
         self._ensure_centerline_cache()
         current_id = id(self.surf_poly) if self.surf_poly is not None else None
@@ -2021,7 +2020,6 @@ class MeshProcessorTab(QWidget):
         # downstream depends on loops
         self._invalidate_centerline_cache("raw")
         return loopA, loopB
-
 
     def _compute_raw_centerline_cached(self):
         """
@@ -2158,10 +2156,6 @@ class MeshProcessorTab(QWidget):
         return True
 
     def generate_centerline(self):
-        """
-        Public entry point. Runs the pipeline but only recomputes what is invalid.
-        Changing trim_points / smoothing / n_centerline_points will only redo post-processing.
-        """
         try:
             if not self.input_file or self.surf_poly is None:
                 self.status_label.setText("Status: No input file loaded!")

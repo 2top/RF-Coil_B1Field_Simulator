@@ -208,9 +208,15 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
 # -----------------------------------------------------------------------------
 
 def _pca_axis(points: np.ndarray) -> np.ndarray:
-    """Return principal axis (unit) of a point cloud."""
+    """
+    _pca_axis computes the principal axis of a set of 3D points using PCA.
+    What does this mean?:
+    This function utilizes Principal Component Analysis (PCA) to determine the main direction.
+    PCA states that principal axes are orthogonal for most forms and eliminate the need for complex calculations in cross products. 
+    Using SVD (Singular Value Decomposition), we can find the direction of maximum variance. 
+    Maximum variance will give us the longest axis of the coil... hopefully.
+    """
     pts = points - points.mean(axis=0)
-    # SVD on covariance
     _, _, vt = np.linalg.svd(pts, full_matrices=False)
     axis = vt[0]
     axis = axis / np.linalg.norm(axis)
@@ -281,6 +287,11 @@ def _pick_best_two_loops(loops: list[pv.PolyData], axis: np.ndarray):
     return best_pair if best_pair else (None, None)
 
 def _split_components(ds) -> list[pv.PolyData]:
+    """
+    Split a dataset into connected components (PolyData), returning a list of PolyData objects.
+    This is to create "candidate loops" from edge extraction, in case of multiple loops being 
+    found or fragmentation.
+    """
     if ds is None or ds.n_points == 0:
         return []
     mb = ds.split_bodies()
@@ -300,6 +311,8 @@ def _slice_loops_near_ends(surf_poly: pv.PolyData, axis: np.ndarray, frac: float
     """
     Fallback for watertight meshes (no boundary edges).
     Slice near the two extremes along the principal axis and extract intersection polylines.
+    Literally the last thing to try if all else fails, because it is less robust and not
+    all coils will be capped nicely, or at all. 
     """
     pts = surf_poly.points
     t = pts @ axis
@@ -335,10 +348,9 @@ def extract_coil_end_loops(
 ) -> tuple[pv.PolyData, pv.PolyData]:
     """
     New and Improved end-loop extraction!:
-      1) Try boundary edges only (recommended for open coils)
-      2) Clean/weld edges to reduce fragmentation
-      3) If >2 components, select best two via perimeter + separation along PCA axis
-      4) If no boundary edges (watertight), fallback to slicing near ends
+      1) Try boundary edges only
+      2) Try boundary + feature edges (to catch fragmented ends)
+      3) If no boundary edges (watertight), fallback to slicing near ends
     """
     if surf_poly is None or surf_poly.n_points == 0:
         raise ValueError("surf_poly is empty.")
@@ -352,7 +364,7 @@ def extract_coil_end_loops(
             feature_edges=False,
             manifold_edges=False,
             feature_angle=angle_threshold
-        ).clean(tolerance=clean_tolerance)
+        ).clean(tolerance=clean_tolerance) # .clean will remove any null values (which was an issue before)
 
         loops = _split_components(edges)
 
