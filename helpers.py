@@ -9,6 +9,7 @@ import gmsh
 import meshio
 import pyvista as pv
 from scipy.interpolate import splprep, splev, interp1d
+from PyQt5.QtWidgets import QApplication, QLabel
 
 
 # -----------------------------------------------------------------------------
@@ -58,7 +59,8 @@ def create_polyline(points: np.ndarray, closed: bool = False) -> pv.PolyData:
 def mesh_step_file(step_filename: str,
                    mesh_filename: str,
                    element_size: float = 0.2,
-                   size_factor: float = 1.0) -> None:
+                   size_factor: float = 1.0,
+                   status_label: QLabel = None) -> None:
     """
     Mesh a STEP file using Gmsh with optional curvature refinement.
 
@@ -70,7 +72,7 @@ def mesh_step_file(step_filename: str,
     """
     try:
         gmsh.initialize()
-        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.option.setNumber("General.Terminal", 0)
         gmsh.open(step_filename)
         # Classic global parameters
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size)
@@ -78,12 +80,24 @@ def mesh_step_file(step_filename: str,
         gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 1)
         gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 1)
 
+        status_label.setText(f"Meshing STP file '{os.path.basename(step_filename)}'...")
+        QApplication.processEvents()
+
+        gmsh.logger.start()
+
         gmsh.model.mesh.generate(3)
+
+        for i, msg in enumerate(gmsh.logger.get()):
+            if i % 20 == 0:
+                status_label.setText(msg.strip())
+            QApplication.processEvents()
+
         gmsh.write(mesh_filename)
         logging.info(f"Meshed '{step_filename}' to '{mesh_filename}' size=[{element_size}, {element_size * size_factor}])")
 
     except Exception as e:
         logging.error(f"Gmsh meshing failed for file {step_filename}: {e}")
+        status_label.setText(f"Error: Gmsh meshing failed: {e}")
     finally:
         gmsh.finalize()
 
@@ -156,7 +170,7 @@ def write_msh_direct_from_stl(mesh_name, vertices, faces):
             f.write(f"{eid} 2 0 {n1+1} {n2+1} {n3+1}\n")
         f.write("$EndElements\n")
 
-def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: float, size_factor: float) -> pv.PolyData:
+def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: float, size_factor: float, status_label: QLabel) -> pv.PolyData:
     """
     Load a surface mesh from an input CAD file. If the file is a STEP file (.stp or .step),
     it is meshed with Gmsh. If it is an STL file (.stl), it is loaded directly.
@@ -178,6 +192,8 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
         try:
             surf_poly = pv.read(input_filename)
             logging.info(f"Loaded surface mesh from STL file: {input_filename}")
+            status_label.setText(f"Converting STL to mesh: {os.path.basename(input_filename)}")
+            QApplication.processEvents()
             vertices = surf_poly.points
             faces    = surf_poly.faces.reshape((-1, 4))[:, 1:]
             write_msh_direct_from_stl(mesh_filename, vertices, faces)
@@ -185,7 +201,7 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
         except Exception as e:
             logging.error(f"Failed to load STL file '{input_filename}': {e}")
     elif ext in [".stp", ".step"]:
-        mesh_step_file(input_filename, mesh_filename, element_size, size_factor)
+        mesh_step_file(input_filename, mesh_filename, element_size, size_factor, status_label)
         grid_or_poly = load_msh_as_pv_mesh(mesh_filename)
         if isinstance(grid_or_poly, pv.UnstructuredGrid):
             surf_poly = grid_or_poly.extract_surface()
@@ -194,11 +210,14 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
         return surf_poly
     elif ext in [".msh", ".mesh"]:
         try:
+            status_label.setText(f"Loading .msh file: {os.path.basename(input_filename)}")
+            QApplication.processEvents()
             pv_grid = load_msh_as_pv_mesh(mesh_filename)
             surf_poly = extract_surface_mesh_from_volume(pv_grid)
             return surf_poly
         except Exception as e:
             logging.error(f"Failed to load .msh file '{input_filename}': {e}")
+            status_label.setText(f"Error: Failed to load .msh file: {e}")
     else:
         logging.error("Unsupported file format. Please use a .stp/.stl/.msh file.")
 
@@ -502,24 +521,33 @@ def map_poly_points_to_surface_indices(
 
 def compute_marching_rings(surf_poly: pv.PolyData,
                            loopA: pv.PolyData,
-                           loopB: pv.PolyData) -> list[set]:
+                           loopB: pv.PolyData,
+                           status_label= QLabel) -> list[set]:
     """
     Return marching_record (list of vertex-index sets) without collapsing
     them into center points.
     """
+    status_label.setText("Computing marching rings...")
+    QApplication.processEvents()
     pv_faces = surf_poly.faces.reshape((-1, 4))[:, 1:]
     vertices = surf_poly.points
 
+    status_label.setText("Mapping end loops to surface vertices...")
+    QApplication.processEvents()
     loopA_plane_centroid, loopA_plane_normal = compute_best_fit_plane(loopA.points)
     loopB_plane_centroid, loopB_plane_normal = compute_best_fit_plane(loopB.points)
 
+    status_label.setText("Selecting end vertices near planes...")
+    QApplication.processEvents()
     endA_vertex_indices = select_vertices_near_plane(
         surf_poly, loopA_plane_centroid, loopA_plane_normal, TOL
     )
     endB_vertex_indices = select_vertices_near_plane(
         surf_poly, loopB_plane_centroid, loopB_plane_normal, TOL
     )
-
+    
+    status_label.setText("Identifying active vertices...")
+    QApplication.processEvents()
     all_vertex_indices = set(range(len(vertices)))
     inactive_vertex_indices = set(endA_vertex_indices).union(set(endB_vertex_indices))
     active_vertex_indices = all_vertex_indices - inactive_vertex_indices
@@ -529,6 +557,8 @@ def compute_marching_rings(surf_poly: pv.PolyData,
         if any(v in active_vertex_indices for v in face):
             pv_faces_set.add(f_idx)
 
+    status_label.setText("Mapping loop points to surface vertices...")
+    QApplication.processEvents()
     V_mov = map_poly_points_to_surface_indices(loopA, surf_poly, tol=None)
     V_ref = map_poly_points_to_surface_indices(loopB, surf_poly, tol=None)
 
@@ -562,6 +592,7 @@ def compute_marching_rings(surf_poly: pv.PolyData,
     visited = set()
     marching_record = []
     current_moving = set(V_mov)
+    total_len = len(pv_faces_set)
 
     while True:
         visited |= current_moving
@@ -580,6 +611,14 @@ def compute_marching_rings(surf_poly: pv.PolyData,
 
         marching_record.append(new_moving.copy())
         current_moving = new_moving
+
+        if len(marching_record) % 10 == 0:
+            status_label.setText(
+                f"Computing marching rings... "
+                f"processed {len(marching_record)} rings, "
+                f"{len(new_active_faces)}/{total_len} faces remaining."
+            )
+            QApplication.processEvents()
 
     return marching_record
 
@@ -1202,7 +1241,7 @@ def plot_marching_record(surface_mesh: pv.PolyData, raw_centerline: np.ndarray, 
         plotter = pv.Plotter()
 
     plotter.add_mesh(surface_mesh, color='lightgray', opacity=0.5, label='Surface Mesh')
-    plotter.add_mesh(pv.PolyData(raw_centerline), color='blue', line_width=3, label='Raw Centerline')
+    plotter.add_mesh(pv.PolyData(raw_centerline), color='blue', line_width=3, label='Centerline')
     plotter.add_mesh(loopA, color="red", line_width=2, label="Loop A")
     plotter.add_mesh(loopB, color="green", line_width=2, label="Loop B")
 
