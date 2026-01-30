@@ -573,19 +573,19 @@ class MagneticFieldVisualizer(QWidget):
         # Field type selection
         layout.addWidget(QLabel("<b>Field Type:</b>"))
         self.field_compute_dropdown = QComboBox()
-        self.field_compute_dropdown.addItems(["B-field (magnetic)", "E-field (electric)"])
+        self.field_compute_dropdown.addItems(["B-field (magnetic)"]) # Removed "E-field (electric)"
         self.field_compute_dropdown.currentIndexChanged.connect(self.on_field_type_changed)
         layout.addWidget(self.field_compute_dropdown)
         
         # Frequency (for E-field)
-        freq_layout = QHBoxLayout()
-        freq_layout.addWidget(QLabel("Frequency (MHz):"))
-        self.freq_input = QLineEdit("400")
-        self.freq_input.setFixedWidth(80)
-        self.freq_input.setEnabled(False)
-        freq_layout.addWidget(self.freq_input)
-        freq_layout.addStretch()
-        layout.addLayout(freq_layout)
+        # freq_layout = QHBoxLayout()
+        # freq_layout.addWidget(QLabel("Frequency (MHz):"))
+        # self.freq_input = QLineEdit("400")
+        # self.freq_input.setFixedWidth(80)
+        # self.freq_input.setEnabled(False)
+        # freq_layout.addWidget(self.freq_input)
+        # freq_layout.addStretch()
+        # layout.addLayout(freq_layout)
         
         layout.addSpacing(10)
         
@@ -2404,6 +2404,19 @@ class MeshProcessorTab(QWidget):
                     main_window.tabs.setCurrentIndex(i)
                     break
             QMessageBox.information(self, "Export", "Data exported to Field Visualizer tab.")
+
+            # Set all parameters back to defaults
+            self.element_size = 0.15
+            self.max_element_size_factor = 2.0
+            self.feature_angle = 75
+            self.trim_points = 0
+            self.centerline_s = 0.01
+            self.surfacecurves_s = 0.01
+            self.loop_smoothing = 0.0
+            self.n_centerline_points = 500
+            self.n_loop_points = 100
+            self.n_subset_points = 20
+            self.marching_record_step = 5
         else:
             QMessageBox.information(self, "Export", "Data exported (but could not find Field Visualizer tab to update).")
 
