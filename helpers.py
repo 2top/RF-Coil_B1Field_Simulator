@@ -366,7 +366,6 @@ def extract_coil_end_loops(
     prefer_boundary_only: bool = True,
 ) -> tuple[pv.PolyData, pv.PolyData]:
     """
-    New and Improved end-loop extraction!:
       1) Try boundary edges only
       2) Try boundary + feature edges (to catch fragmented ends)
       3) If no boundary edges (watertight), fallback to slicing near ends

@@ -1532,11 +1532,14 @@ class MeshProcessorTab(QWidget):
             enabled=False,
         )
         file_layout.addRow(QLabel("Max Size Factor"), self.max_element_size_factor_input)
-
+        
+        file_layout.addRow(self._spacer_label())
         self.workflow_btn = QCheckBox("Enable Step-by-Step Walkthrough")
         self.workflow_btn.setChecked(False)
         self.workflow_btn.setToolTip("Enable guided workflow for processing steps")
         file_layout.addRow(QLabel("Workflow"), self.workflow_btn)
+
+        file_layout.addRow(self._spacer_label(), self.btn_with_tooltip("Reset Parameters", self.reset_values, "Reset the parameter values to default settings."))
 
         # ---- Centerline Tab ----
         center_tab = QWidget()
@@ -1732,6 +1735,19 @@ class MeshProcessorTab(QWidget):
     def clear_plot(self):
         self.plotter.clear()
         self.status_label.setText("Status: Plot Cleared")
+
+    def reset_values(self):
+        self.element_size_input.setValue(0.15)
+        self.max_element_size_factor_input.setValue(2.0)
+        self.feature_angle_input.setValue(75)
+        self.trim_points_input.setValue(0)
+        self.centerline_s_input.setValue(0.01)
+        self.surfacecurves_s_input.setValue(0.01)
+        self.loop_smoothing_input.setValue(0.0)
+        self.n_centerline_points_input.setValue(500)
+        self.n_loop_points_input.setValue(100)
+        self.n_subset_points_input.setValue(20)
+        self.marching_record_step_input.setValue(5)
         
     def stp_check(self, argument, default):
         return argument if (self.accept_stp or self.accept_msh) else default
@@ -1920,8 +1936,8 @@ class MeshProcessorTab(QWidget):
             self.accept_stl = False
 
         self.surf_poly = self.helpers.load_surface_mesh(
-            msh_path,   # treat the .msh as the "input"
-            msh_path,   # and the mesh path
+            msh_path,  
+            msh_path, 
             self.stp_check(self.element_size, 0.15),
             self.stp_check(self.max_element_size_factor, 2.0),
             self.status_label
@@ -2405,18 +2421,6 @@ class MeshProcessorTab(QWidget):
                     break
             QMessageBox.information(self, "Export", "Data exported to Field Visualizer tab.")
 
-            # Set all parameters back to defaults
-            self.element_size = 0.15
-            self.max_element_size_factor = 2.0
-            self.feature_angle = 75
-            self.trim_points = 0
-            self.centerline_s = 0.01
-            self.surfacecurves_s = 0.01
-            self.loop_smoothing = 0.0
-            self.n_centerline_points = 500
-            self.n_loop_points = 100
-            self.n_subset_points = 20
-            self.marching_record_step = 5
         else:
             QMessageBox.information(self, "Export", "Data exported (but could not find Field Visualizer tab to update).")
 
