@@ -278,12 +278,16 @@ def _pick_best_two_loops(loops: list[pv.PolyData], axis: np.ndarray):
     scored = [(lp, _component_perimeter(lp), lp.n_points) for lp in loops]
     scored.sort(key=lambda x: x[1], reverse=True)
 
+    # print(f"Scores(pre sort): {scored}")
+
     # Reject tiny components (This may want to have tunable thresholds... haven't decided yet)
     MIN_PTS = 10          # keep loops with at least 10 points
     MIN_FRAC = 0.50       # keep loops with at least 50% of the max length
 
     max_len = scored[0][1] if scored else 0.0
     filtered = [(lp, ln) for (lp, ln, npts) in scored if npts >= MIN_PTS and ln >= MIN_FRAC * max_len]
+
+    # print(f"Filtered(post sort): {filtered}")
 
     # If filtering leaves fewer than 2, fall back to the top-2 by length
     if len(filtered) < 2:
@@ -331,7 +335,7 @@ def _slice_loops_near_ends(surf_poly: pv.PolyData, axis: np.ndarray, frac: float
     Fallback for watertight meshes (no boundary edges).
     Slice near the two extremes along the principal axis and extract intersection polylines.
     Literally the last thing to try if all else fails, because it is less robust and not
-    all coils will be capped nicely, or at all. 
+    all coils will be capped nicely. 
     """
     pts = surf_poly.points
     t = pts @ axis
@@ -367,7 +371,7 @@ def extract_coil_end_loops(
 ) -> tuple[pv.PolyData, pv.PolyData]:
     """
       1) Try boundary edges only
-      2) Try boundary + feature edges (to catch fragmented ends)
+      2) Try boundary + feature edges
       3) If no boundary edges (watertight), fallback to slicing near ends
     """
     if surf_poly is None or surf_poly.n_points == 0:
@@ -382,7 +386,7 @@ def extract_coil_end_loops(
             feature_edges=False,
             manifold_edges=False,
             feature_angle=angle_threshold
-        ).clean(tolerance=clean_tolerance) # .clean will remove any null values (which was an issue before)
+        ).clean(tolerance=clean_tolerance) 
 
         loops = _split_components(edges)
 
@@ -395,6 +399,7 @@ def extract_coil_end_loops(
                 return loopA, loopB
 
         # If prefer_boundary_only is True but we didn't find two loops, continue to Pass 2.
+        # ... We will almost always use pass 2 and not pass 1
 
     # --- Pass 2: Boundary + feature edges (to catch fragmented ends) ---
     edges = surf_poly.extract_feature_edges(
@@ -414,6 +419,7 @@ def extract_coil_end_loops(
         return loops[0], loops[1]
 
     if len(loops) > 2:
+        print("TOO MANY LOOPS")
         loopA, loopB = _pick_best_two_loops(loops, axis)
         if loopA is not None and loopB is not None:
             return loopA, loopB
@@ -1241,8 +1247,8 @@ def plot_marching_record(surface_mesh: pv.PolyData, raw_centerline: np.ndarray, 
 
     plotter.add_mesh(surface_mesh, color='lightgray', opacity=0.5, label='Surface Mesh')
     plotter.add_mesh(pv.PolyData(raw_centerline), color='blue', line_width=3, label='Centerline')
-    plotter.add_mesh(loopA, color="red", line_width=2, label="Loop A")
-    plotter.add_mesh(loopB, color="green", line_width=2, label="Loop B")
+    plotter.add_mesh(loopA, color="red", line_width=2, label="Start Loop")
+    plotter.add_mesh(loopB, color="green", line_width=2, label="End Loop")
 
     for idx, v_set in enumerate(marching_record):
         if idx % step == 0:

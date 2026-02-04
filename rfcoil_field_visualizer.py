@@ -1550,6 +1550,7 @@ class MeshProcessorTab(QWidget):
             lambda val: setattr(self, "feature_angle", val),
             tooltip="Feature angle determines where the end loops of the coil are defined",
             enabled=True,
+            max_value=90 # This needs a limit to avoid errors 
         )
         center_layout.addRow(QLabel("Feature Angle"), self.feature_angle_input)
 
@@ -2361,8 +2362,8 @@ class MeshProcessorTab(QWidget):
             QApplication.processEvents()
             self.plotter.add_mesh(self.surf_poly, color="lightblue", opacity=0.5, label="Surface Mesh")
             self.plotter.add_mesh(self.final_centerline_poly, color="magenta", line_width=3, label="Centerline")
-            self.plotter.add_mesh(refined_loopA_poly, color="red", line_width=2, label="Loop A")
-            self.plotter.add_mesh(refined_loopB_poly, color="green", line_width=2, label="Loop B")
+            self.plotter.add_mesh(refined_loopA_poly, color="red", line_width=2, label="Start Loop")
+            self.plotter.add_mesh(refined_loopB_poly, color="green", line_width=2, label="End Loop")
 
             subset_poly = self.pv.PolyData(subset_points)
             self.plotter.add_mesh(subset_poly, color="red", point_size=5, render_points_as_spheres=True, label="Subset Points")
