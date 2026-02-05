@@ -2127,6 +2127,12 @@ class MeshProcessorTab(QWidget):
             logging.error("Failed to compute raw centerline from marching rings.")
             self._invalidate_centerline_cache("raw")
             return None, None
+        raw_centerline = self.helpers.densify_centerline_with_slices(
+            self.surf_poly,
+            raw_centerline,
+            gap_factor=2.5,
+            slice_min_points=10,
+        )
 
         self.raw_centerline_forward = raw_centerline
         self.marching_record_forward = moving_sections
@@ -2283,6 +2289,8 @@ class MeshProcessorTab(QWidget):
             self.status_label.setText("Status: Generating cross-sections...")
             cross_sections_scaffold = []
             total_sections = len(self.final_centerline)
+
+            prev_slice_center = None
             
             for i in range(total_sections):
                 # Update progress every 10% of sections
@@ -2294,15 +2302,21 @@ class MeshProcessorTab(QWidget):
                 
                 if i == 0:
                     cross_sections_scaffold.append(refined_loopA_pts)
+                    prev_slice_center = np.mean(refined_loopA_pts, axis=0)
                     continue
                 elif i == len(self.final_centerline) - 1:
                     cross_sections_scaffold.append(refined_loopB_pts)
+                    prev_slice_center = np.mean(refined_loopB_pts, axis=0)
                     continue
                 center = self.final_centerline[i]
                 n_i = n_vecs[i]
                 x_i = x_vecs[i]
                 y_i = y_vecs[i]
-                sliced = self.helpers.slice_surface_at_point(self.surf_poly, center, n_i)
+
+                fallback_prev = self.final_centerline[i-1] if i > 0 else None
+                continuity_prev = prev_slice_center if prev_slice_center is not None else fallback_prev
+
+                sliced = self.helpers.slice_surface_at_point(self.surf_poly, center, n_i, prev_center=continuity_prev, prev_weight=0.5)
                 if sliced is None or sliced.n_points < 3:
                     cross_sections_scaffold.append(None)
                     continue
@@ -2325,6 +2339,7 @@ class MeshProcessorTab(QWidget):
                 sorted_pts = self.helpers.ensure_closed(sorted_pts)
                 refined_pts = self.helpers.refine_loop(self.pv.PolyData(sorted_pts), n_points=self.n_loop_points, smoothing=self.loop_smoothing, spline_degree=3)
                 cross_sections_scaffold.append(refined_pts)
+                prev_slice_center = sliced.points.mean(axis=0)
 
             self.status_label.setText("Status: Preparing surface curve generation...")
             subset_points = self.helpers.select_evenly_spaced_subset(refined_loopA_pts, small_N=self.n_subset_points)

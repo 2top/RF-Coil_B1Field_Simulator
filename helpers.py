@@ -465,12 +465,11 @@ def split_connected_loops(poly: pv.PolyData) -> list[pv.PolyData]:
                 loops.append(sub)
 
         return loops
-
-    # Fallback: point-based connectivity
+    
+    # Fallback
     labeled = poly.connectivity(point_data=True)
     rid_point = labeled.point_data.get('RegionId', None)
     if rid_point is None:
-        # Last resort: return the input as single component
         return [poly]
 
     rids = np.unique(rid_point)
@@ -505,9 +504,8 @@ def map_poly_points_to_surface_indices(
     if tol is None:
         xmin, xmax, ymin, ymax, zmin, zmax = surf_poly.bounds
         diag = float(np.linalg.norm([xmax - xmin, ymax - ymin, zmax - zmin]))
-        tol = max(1e-6, 1e-4 * diag)  # adjust to 1e-3*diag if still failing
+        tol = max(1e-6, 1e-4 * diag) 
 
-    # Fast path if SciPy exists
     try:
         from scipy.spatial import cKDTree
         tree = cKDTree(surf_pts)
@@ -515,14 +513,12 @@ def map_poly_points_to_surface_indices(
         # print(f"[DEBUG] map distances: min={dists.min():.3e} med={np.median(dists):.3e} max={dists.max():.3e} tol={tol:.3e}") # If tol of mid and max are >> tol, then mapping is failing.
         return {int(i) for d, i in zip(dists, idxs) if d <= tol}
     except Exception:
-        # Fallback using PyVista's closest point
         out = set()
         for p in loop_pts:
             i = int(surf_poly.find_closest_point(p))
             if float(np.linalg.norm(surf_pts[i] - p)) <= tol:
                 out.add(i)
         return out
-
 
 def compute_marching_rings(surf_poly: pv.PolyData,
                            loopA: pv.PolyData,
@@ -1007,35 +1003,114 @@ def minimal_rotation_matrix(u: np.ndarray, v: np.ndarray) -> np.ndarray:
     angle = np.arccos(np.clip(dot_val, -1, 1))
     return rodrigues(axis, angle)
 
-def slice_surface_at_point(surf_poly: pv.PolyData, point: np.ndarray, normal: np.ndarray) -> Optional[pv.PolyData]:
+def slice_surface_at_point(
+    surf_poly: pv.PolyData,
+    point: np.ndarray,
+    normal: np.ndarray,
+    prev_center: Optional[np.ndarray] = None,
+    prev_weight: float = 1.0,
+    min_points: int = 10,
+    far_ratio_reject: float = 5.0 
+) -> Optional[pv.PolyData]:
     """
-    Slice the surface mesh with a plane defined by a point and a normal.
-    If multiple loops result, return the one whose centroid is closest to the point.
-    
-    Parameters:
-        surf_poly: The surface mesh.
-        point: A point on the slicing plane.
-        normal: The normal vector of the slicing plane.
-    
-    Returns:
-        The sliced loop as a PolyData, or None if the intersection is insufficient.
+    Slice surf_poly at (point, normal). If multiple loops exist, choose the loop
+    that stays closest to the requested point AND to prev_center (continuity).
+
+    Uses centroid = mean(loop.points) (NOT loop.center).
     """
     sliced = surf_poly.slice(origin=point, normal=normal)
-    if sliced.n_points < 3:
+    if sliced is None or sliced.n_points < min_points:
         return None
+
     loops = sliced.split_bodies()
-    if isinstance(loops, pv.MultiBlock):
-        min_dist = float('inf')
-        closest_loop = None
-        for i in range(len(loops)):
-            loop = loops[i]
-            dist = np.linalg.norm(loop.center - point)
-            if dist < min_dist:
-                min_dist = dist
-                closest_loop = loop
-        return closest_loop
-    else:
-        return loops
+
+
+    if not isinstance(loops, pv.MultiBlock):
+        return loops if loops.n_points >= min_points else None
+
+    use_prev = prev_center is not None
+    prev_center = np.asarray(prev_center, dtype=float) if use_prev else None
+    point = np.asarray(point, dtype=float)
+
+    candidates = []
+    for i in range(len(loops)):
+        loop = loops[i]
+        if loop is None or loop.n_points < min_points:
+            continue
+
+        centroid = loop.points.mean(axis=0)
+        d_point = float(np.linalg.norm(centroid - point))
+        d_prev  = float(np.linalg.norm(centroid - prev_center)) if use_prev else 0.0
+
+        score = d_point + (prev_weight * d_prev)
+        candidates.append((score, d_point, d_prev, loop))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0])
+    best_score, best_d_point, best_d_prev, best_loop = candidates[0]
+
+    if len(candidates) > 1:
+        second_score, second_d_point, second_d_prev, _ = candidates[1]
+        if second_score > far_ratio_reject * best_score:
+            return best_loop
+
+    return best_loop
+
+def densify_centerline_with_slices(
+    surf_poly: pv.PolyData,
+    raw_centerline: np.ndarray,
+    gap_factor: float = 2.5,
+    slice_min_points: int = 10,
+) -> np.ndarray:
+    """
+    Fill large gaps between consecutive raw centerline points by:
+      1) inserting linear points along the chord (B - A)
+      2) re-centering each inserted point using a mesh slice whose normal is the chord direction
+
+    IMPORTANT: This does NOT use any "last marching record direction". Straightaways are defined by the chord.
+
+    THIS IS STUPID IMPORTANT FOR .STLS! A lot of low poly stl files have long straightaways with no change in surface, so this helps A LOT
+    """
+    pts = np.asarray(raw_centerline, dtype=float)
+    if pts.shape[0] < 2:
+        return pts
+
+    seg = pts[1:] - pts[:-1]
+    seglen = np.linalg.norm(seg, axis=1)
+    med = float(np.median(seglen[seglen > 1e-12])) if np.any(seglen > 1e-12) else 0.0
+    if med <= 0.0:
+        return pts
+
+    target = med
+    out = [pts[0]]
+
+    for i in range(len(pts) - 1):
+        A = pts[i]
+        B = pts[i + 1]
+        dvec = B - A
+        d = float(np.linalg.norm(dvec))
+        if d < 1e-12:
+            continue
+
+        n = dvec / d
+
+        n_insert = int(np.ceil(d / target)) - 1 if d > gap_factor * target else 0
+
+        for k in range(1, n_insert + 1):
+            a = k / (n_insert + 1)
+            p = (1 - a) * A + a * B
+
+            sliced = slice_surface_at_point(surf_poly, p, n)
+            if sliced is not None and sliced.n_points >= slice_min_points:
+                p = sliced.points.mean(axis=0)
+
+            out.append(p)
+
+        out.append(B)
+
+    return np.asarray(out, dtype=float)
 
 def compute_local_tangent(centerline: np.ndarray, i: int) -> np.ndarray:
     """
