@@ -840,7 +840,12 @@ class MagneticFieldVisualizer(QWidget):
             exclusion_distance = 0.0
 
         test_poly = pv.PolyData(points)
-        enclosed_result = test_poly.select_enclosed_points(self.surf_poly, check_surface=True)
+        try: 
+            enclosed_result = test_poly.select_enclosed_points(self.surf_poly, check_surface=True)
+        except: 
+            logger.warning("This coil is not closed. Falling back on check_surface=False.")
+            enclosed_result = test_poly.select_enclosed_points(self.surf_poly, check_surface=False)
+
         inside_mask = enclosed_result["SelectedPoints"]
         keep_mask = inside_mask == 0
 

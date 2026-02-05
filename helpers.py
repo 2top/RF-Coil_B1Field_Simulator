@@ -221,7 +221,6 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
     else:
         logging.error("Unsupported file format. Please use a .stp/.stl/.msh file.")
 
-
 # -----------------------------------------------------------------------------
 # Centerline and End Loop Extraction Functions
 # -----------------------------------------------------------------------------
