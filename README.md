@@ -66,7 +66,7 @@ The main application window will open with three tabs:
 **Workflow**:
 1. Select file type (STL, STEP, or MSH) using radio buttons
 2. Click "Load File" and select your coil geometry file
-3. The application **automatically** extracts the centerline and generates surface curves
+3. The application extracts the centerline and generates surface curves
 4. View the processed geometry in the 3D visualization panel
 5. (Optional) Adjust processing parameters and click "Generate Surface Curves" to regenerate
 6. Click "Export to Visualizer" (at bottom of panel) to send the coil to the Field Visualization tab
@@ -74,8 +74,8 @@ The main application window will open with three tabs:
 **Parameter Availability by File Type**:
 
 *STL files*:
-- Only **Feature Angle** parameter is enabled (for edge detection)
-- All other parameters are disabled (mesh already exists)
+- **Meshing parameters**: are disabled 
+- **Processing parameters** are enabled (Feature Angle, smoothing, point counts)
 
 *STEP files*:
 - **All parameters** are enabled:
@@ -86,23 +86,29 @@ The main application window will open with three tabs:
 - **Meshing parameters** are disabled (mesh already exists)
 - **Processing parameters** are enabled (Feature Angle, smoothing, point counts)
 
-**Key Parameters**:
+**Parameters**:
 - **Element Size**: Base mesh element size in mm (STEP only)
 - **Max Size Factor**: Multiplier for element size (STEP only)
-- **Sizing Mode**: Uniform or curvature-based mesh sizing (STEP only)
-- **Feature Angle**: Angle threshold for edge detection (30-85°, default: 65-75°)
-- **Loop Smoothing**: Smoothing factor for end loops (STEP and MSH only)
+- **Feature Angle**: Angle threshold for edge detection (30-85°, default: 75°)
+- **Centerline Smooth**: Smooth centerline using spline fitting.
+- **Centerline Points**: Determine the number of points in the centerline
+- **Marching Record Step**: Increase or Decrease number of marching rings
+- **Trim Points**: Number of points to take off the end of the centerline
+- **Surface Curves Smooth**: Smooth the surface curves using spline fit
+- **Loop Smoothing**: Smoothing factor for end loops
+- **Loop Points**: number of points in the loops
+- **Subset Points**: number of surface curves following the centerline 
 
 **Status Messages**:
 - Red status messages at the top show processing progress
-- Messages update during: loading, meshing, centerline extraction, surface curve generation
+- Green status shows current loaded file
 
 **Notes**:
 - The geometry is automatically plotted in the visualization window after loading
-- For STEP files, a .msh file is generated in the same directory and can be reloaded later to skip meshing
+- A .msh file is generated in the same directory and can be reloaded later to skip meshing
 - Surface curves represent approximations of current distribution on the coil surface
-- The Mesh Processor uses a **two-column compact grid layout** for efficient parameter organization
 - A **Clear Plot** button is available to clear the current visualization
+- The **Default Parameter** button resets all values back to their initial values 
 
 
 ### 2. Optimization Tab
