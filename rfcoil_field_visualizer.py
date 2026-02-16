@@ -1922,9 +1922,10 @@ class MeshProcessorTab(QWidget):
             self.element_size = self.element_size_input.value()
             self.max_element_size_factor = self.max_element_size_factor_input.value()
             self.clear_plot()
+            self.input_file = self.source_file
             self.status_label.setText("Status: Regenerating mesh...")
             self.surf_poly = self.helpers.load_surface_mesh(
-                self.source_file,
+                self.input_file,
                 self.msh_file,
                 self.element_size,
                 self.max_element_size_factor,
