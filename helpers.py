@@ -9,13 +9,11 @@ import gmsh
 import meshio
 import pyvista as pv
 from scipy.interpolate import splprep, splev, interp1d
-import matplotlib.pyplot as plt
-
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QApplication, QLabel
 
 
 # -----------------------------------------------------------------------------
-# Constants (instead of magic numbers)
+# Constants
 # -----------------------------------------------------------------------------
 ENDPOINT_WEIGHT: float = 1000.0  # Weight applied to endpoints during spline smoothing.
 TOL: float = 1e-6               # Tolerance for floating point comparisons.
@@ -59,10 +57,10 @@ def create_polyline(points: np.ndarray, closed: bool = False) -> pv.PolyData:
 # Mesh Loading / Creation Functions
 # -----------------------------------------------------------------------------
 def mesh_step_file(step_filename: str,
-                   mesh_filename: str = "generated_mesh.msh",
+                   mesh_filename: str,
                    element_size: float = 0.2,
                    size_factor: float = 1.0,
-                   sizing_mode: str = "uniform") -> None:
+                   status_label: QLabel = None) -> None:
     """
     Mesh a STEP file using Gmsh with optional curvature refinement.
 
@@ -71,107 +69,78 @@ def mesh_step_file(step_filename: str,
         mesh_filename: The temporary output mesh file.
         element_size: The minimum element size.
         size_factor: Multiplier for maximum element size.
-        sizing_mode: Either 'uniform' or 'curvature' for adaptive refinement.
     """
     try:
         gmsh.initialize()
-        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.option.setNumber("General.Terminal", 0)
         gmsh.open(step_filename)
-        if sizing_mode == "uniform":
-            # Classic global parameters
-            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size)
-            gmsh.option.setNumber("Mesh.CharacteristicLengthMax",
-                                   element_size * size_factor)
+        # Classic global parameters
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", element_size * size_factor)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 1)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 1)
 
-        elif sizing_mode == "curvature":
-            # --------------------------------------------------------------
-            # Curvature-controlled mesh size (Gmsh ≥ 4.10)
-            # --------------------------------------------------------------
-            gmsh.option.setNumber("Mesh.MeshSizeFromPoints",         0)
-            gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+        status_label.setText(f"Meshing STP file '{os.path.basename(step_filename)}'...")
+        QApplication.processEvents()
 
-            # ↓ Target # of elements per full 2π bend (tune as you like)
-            gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 25)
-
-            # Hard limits
-            gmsh.option.setNumber("Mesh.MeshSizeMin",  element_size)
-            gmsh.option.setNumber("Mesh.MeshSizeMax",  element_size * size_factor)
-
+        gmsh.logger.start()
 
         gmsh.model.mesh.generate(3)
+
+        for i, msg in enumerate(gmsh.logger.get()):
+            if i % 20 == 0:
+                status_label.setText(msg.strip())
+            QApplication.processEvents()
+
         gmsh.write(mesh_filename)
-        logging.debug(f"Meshed '{step_filename}' to '{mesh_filename}' (mode={sizing_mode}, size=[{element_size}, {element_size * size_factor}])")
+        logging.info(f"Meshed '{step_filename}' to '{mesh_filename}' size=[{element_size}, {element_size * size_factor}])")
 
     except Exception as e:
         logging.error(f"Gmsh meshing failed for file {step_filename}: {e}")
+        status_label.setText(f"Error: Gmsh meshing failed: {e}")
     finally:
         gmsh.finalize()
 
-def load_msh_as_pv_mesh(msh_filename: str = "generated_mesh.msh"):
+def load_msh_as_pv_mesh(msh_filename: str) -> pv.UnstructuredGrid:
     """
-    Convert a Gmsh .msh file to a PyVista UnstructuredGrid or PolyData.
-    
-    Parameters:
-        msh_filename: The filename of the .msh file.
-    
-    Returns:
-        A PyVista UnstructuredGrid containing the volumetric mesh, or
-        a PyVista PolyData if only surface elements are present.
+    Load a Gmsh .msh into either:
+      - pv.UnstructuredGrid (if volumetric cells exist), or
+      - pv.PolyData (if only surface triangles exist)
     """
-    try:
-        mesh = meshio.read(msh_filename)
-    except Exception as e:
-        logging.error(f"Error reading mesh file {msh_filename}: {e}")
-        return None
-
+    mesh = meshio.read(msh_filename)
     points = mesh.points
-    cells = []
-    cell_types = []
-    
-    # First, try to find volumetric cells
-    for cell_block in mesh.cells:
-        ctype = cell_block.type
+
+    # --- Try volumetric first ---
+    vol_cells = []
+    vol_types = []
+
+    for block in mesh.cells:
+        ctype = block.type
         if ctype in ["tetra", "hexahedron", "wedge", "pyramid"]:
-            for cell in cell_block.data:
-                cells.append(np.concatenate(([len(cell)], cell)))
-            if ctype == "tetra":
-                vtk_cell_type = 10
-            elif ctype == "hexahedron":
-                vtk_cell_type = 12
-            elif ctype == "wedge":
-                vtk_cell_type = 13
-            elif ctype == "pyramid":
-                vtk_cell_type = 14
-            cell_types.extend([vtk_cell_type] * len(cell_block.data))
-    
-    # If volumetric cells found, return UnstructuredGrid
-    if len(cells) > 0:
-        cells = np.hstack(cells)
-        cell_types = np.array(cell_types)
-        pv_grid = pv.UnstructuredGrid(cells, cell_types, points)
-        return pv_grid
-    
-    # If no volumetric cells, look for surface cells (triangles, quads)
-    logging.debug("No 3D volumetric cells found, looking for surface elements...")
-    faces = []
-    for cell_block in mesh.cells:
-        ctype = cell_block.type
-        if ctype == "triangle":
-            for tri in cell_block.data:
-                faces.append(np.concatenate(([3], tri)))
-        elif ctype == "quad":
-            for quad in cell_block.data:
-                faces.append(np.concatenate(([4], quad)))
-    
-    if len(faces) == 0:
-        logging.error("No volumetric or surface cells found in the mesh.")
-        return None
-    
-    # Create PolyData from surface elements
-    faces = np.hstack(faces)
-    pv_poly = pv.PolyData(points, faces)
-    logging.debug(f"Loaded surface mesh with {pv_poly.n_cells} cells from MSH file")
-    return pv_poly
+            for cell in block.data:
+                vol_cells.append(np.concatenate(([len(cell)], cell)))
+
+            vtk_map = {"tetra": 10, "hexahedron": 12, "wedge": 13, "pyramid": 14}
+            vol_types.extend([vtk_map[ctype]] * len(block.data))
+
+    if vol_cells:
+        cells = np.hstack(vol_cells)
+        cell_types = np.array(vol_types)
+        return pv.UnstructuredGrid(cells, cell_types, points)
+
+    # --- Fallback: surface triangles ---
+    tri = None
+    for block in mesh.cells:
+        if block.type in ["triangle", "tri"]:
+            tri = block.data
+            break
+
+    if tri is None or len(tri) == 0:
+        raise ValueError(f"No volumetric cells AND no triangle surface cells found in {msh_filename}")
+
+    # PyVista PolyData expects faces as: [3, i0, i1, i2, 3, j0, j1, j2, ...]
+    faces = np.hstack([np.full((tri.shape[0], 1), 3), tri]).astype(np.int64).ravel()
+    return pv.PolyData(points, faces)
 
 def extract_surface_mesh_from_volume(pv_grid: pv.UnstructuredGrid) -> pv.PolyData:
     """
@@ -185,70 +154,8 @@ def extract_surface_mesh_from_volume(pv_grid: pv.UnstructuredGrid) -> pv.PolyDat
     """
     return pv_grid.extract_surface()
 
-def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: float, size_factor: float, sizing_mode="uniform") -> pv.PolyData:
-    """
-    Load a surface mesh from an input CAD file. If the file is a STEP file (.stp or .step),
-    it is meshed with Gmsh. If it is an STL file (.stl), it is loaded directly.
-    If it is a mesh file (.msh), it is loaded from the existing mesh.
-    
-    Parameters:
-        input_filename: The input file (.stp/.step, .stl, or .msh).
-        mesh_filename: Temporary mesh filename (used for STEP files).
-        element_size: Mesh element size for STEP files.
-    
-    Returns:
-        A PyVista PolyData representing the surface mesh.
-    """
-    ext = os.path.splitext(input_filename)[1].lower()
-    if ext == ".stl":
-        try:
-            surf_poly = pv.read(input_filename)
-            logging.debug(f"Loaded surface mesh from STL file: {input_filename}")
-
-            vertices = surf_poly.points
-            faces    = surf_poly.faces.reshape((-1, 4))[:, 1:]
-            write_msh_direct_from_stl(mesh_filename, vertices, faces)
-
-            return surf_poly
-        except Exception as e:
-            logging.error(f"Failed to load STL file '{input_filename}': {e}")
-    elif ext == ".msh":
-        try:
-            mesh_obj = load_msh_as_pv_mesh(input_filename)
-            if mesh_obj is None:
-                logging.error(f"Failed to load MSH file '{input_filename}'")
-                return None
-            # If it's already a PolyData (surface mesh), return it directly
-            if isinstance(mesh_obj, pv.PolyData):
-                surf_poly = mesh_obj
-            else:
-                # If it's an UnstructuredGrid (volumetric mesh), extract surface
-                surf_poly = extract_surface_mesh_from_volume(mesh_obj)
-            logging.debug(f"Loaded surface mesh from MSH file: {input_filename}")
-            return surf_poly
-        except Exception as e:
-            logging.error(f"Failed to load MSH file '{input_filename}': {e}")
-    elif ext in [".stp", ".step"]:
-        mesh_step_file(input_filename, mesh_filename, element_size, size_factor, sizing_mode)
-        try:
-            mesh_obj = load_msh_as_pv_mesh(mesh_filename)
-            if mesh_obj is None:
-                logging.error(f"Failed to load mesh from '{mesh_filename}'")
-                return None
-            # If it's already a PolyData (surface mesh), return it directly
-            if isinstance(mesh_obj, pv.PolyData):
-                surf_poly = mesh_obj
-            else:
-                # If it's an UnstructuredGrid (volumetric mesh), extract surface
-                surf_poly = extract_surface_mesh_from_volume(mesh_obj)
-            return surf_poly
-        except Exception as e:
-            logging.error(f"Failed to load mesh from '{mesh_filename}': {e}")
-    else:
-        logging.error("Unsupported file format. Please use a .stp/.step, .stl, or .msh file.")
-
-def write_msh_direct_from_stl(fname, vertices, faces):
-    with open(fname, "w") as f:
+def write_msh_direct_from_stl(mesh_name, vertices, faces):
+    with open(mesh_name, "w") as f:
         f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
         
         # ---- Nodes ----
@@ -263,38 +170,480 @@ def write_msh_direct_from_stl(fname, vertices, faces):
             f.write(f"{eid} 2 0 {n1+1} {n2+1} {n3+1}\n")
         f.write("$EndElements\n")
 
+def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: float, size_factor: float, status_label: QLabel) -> pv.PolyData:
+    """
+    Load a surface mesh from an input CAD file. If the file is a STEP file (.stp or .step),
+    it is meshed with Gmsh. If it is an STL file (.stl), it is loaded directly.
+    
+    Parameters:
+        input_filename: The input file (.stp/.step or .stl).
+        mesh_filename: Temporary mesh filename (used for STEP files).
+        element_size: Mesh element size for STEP files.
+    
+    Returns:
+        A PyVista PolyData representing the surface mesh.
+    """
+    if not os.path.isfile(input_filename):
+        logging.error(f"Input file '{input_filename}' does not exist.")
+        return None
+    
+    ext = os.path.splitext(input_filename)[1].lower()
+    if ext == ".stl":
+        try:
+            surf_poly = pv.read(input_filename)
+            logging.info(f"Loaded surface mesh from STL file: {input_filename}")
+            status_label.setText(f"Loading stl file: {os.path.basename(input_filename)}")
+            QApplication.processEvents()
+            vertices = surf_poly.points
+            faces    = surf_poly.faces.reshape((-1, 4))[:, 1:]
+            write_msh_direct_from_stl(mesh_filename, vertices, faces)
+            return surf_poly
+        except Exception as e:
+            logging.error(f"Failed to load STL file '{input_filename}': {e}")
+    elif ext in [".stp", ".step"]:
+        status_label.setText(f"Meshing STEP file: {os.path.basename(input_filename)}")
+        QApplication.processEvents()
+        mesh_step_file(input_filename, mesh_filename, element_size, size_factor, status_label)
+        grid_or_poly = load_msh_as_pv_mesh(mesh_filename)
+        if isinstance(grid_or_poly, pv.UnstructuredGrid):
+            surf_poly = grid_or_poly.extract_surface()
+        else:
+            surf_poly = grid_or_poly
+        return surf_poly
+    elif ext in [".msh", ".mesh"]:
+        try:
+            status_label.setText(f"Loading .msh file: {os.path.basename(input_filename)}")
+            QApplication.processEvents()
+            pv_grid = load_msh_as_pv_mesh(mesh_filename)
+            surf_poly = extract_surface_mesh_from_volume(pv_grid)
+            return surf_poly
+        except Exception as e:
+            logging.error(f"Failed to load .msh file '{input_filename}': {e}")
+            status_label.setText(f"Error: Failed to load .msh file: {e}")
+    else:
+        logging.error("Unsupported file format. Please use a .stp/.stl/.msh file.")
 
 # -----------------------------------------------------------------------------
 # Centerline and End Loop Extraction Functions
 # -----------------------------------------------------------------------------
 
-def extract_coil_end_loops(surf_poly, feature_angle=55.0):
-    edges_poly = surf_poly.extract_feature_edges(
+def _pca_axis(points: np.ndarray) -> np.ndarray:
+    """
+    _pca_axis computes the principal axis of a set of 3D points using PCA.
+    What does this mean?:
+    This function utilizes Principal Component Analysis (PCA) to determine the main direction.
+    PCA states that principal axes are orthogonal for most forms and eliminate the need for complex calculations in cross products. 
+    Using SVD (Singular Value Decomposition), we can find the direction of maximum variance. 
+    Maximum variance will give us the longest axis of the coil... hopefully.
+    """
+    pts = points - points.mean(axis=0)
+    _, _, vt = np.linalg.svd(pts, full_matrices=False)
+    axis = vt[0]
+    axis = axis / np.linalg.norm(axis)
+    return axis
+
+def _component_perimeter(ds) -> float:
+    """
+    Robustly estimate 'perimeter'/length for a loop-like dataset.
+    Works for PolyData and UnstructuredGrid.
+    """
+    if ds is None or ds.n_points == 0:
+        return 0.0
+
+    # Coerce to PolyData
+    poly = ds if isinstance(ds, pv.PolyData) else ds.extract_surface()
+
+    if poly is None or poly.n_points == 0 or poly.n_cells == 0:
+        return 0.0
+
+    # Ensure we have line-like geometry; if not, fall back to edges
+    try:
+        has_lines = poly.lines is not None and len(poly.lines) > 0
+    except Exception:
+        has_lines = False
+
+    edge_poly = poly if has_lines else poly.extract_all_edges()
+
+    if edge_poly is None or edge_poly.n_cells == 0:
+        return 0.0
+
+    sizes = edge_poly.compute_cell_sizes(length=True)
+    # 'Length' is the per-cell length; sum it up
+    return float(np.sum(sizes["Length"]))
+
+def _pick_best_two_loops(loops: list[pv.PolyData], axis: np.ndarray):
+    if len(loops) < 2:
+        return None, None
+
+    # Compute perimeter/length scores
+    scored = [(lp, _component_perimeter(lp), lp.n_points) for lp in loops]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # print(f"Scores(pre sort): {scored}")
+
+    # Reject tiny components (This may want to have tunable thresholds... haven't decided yet)
+    MIN_PTS = 10          # keep loops with at least 10 points
+    MIN_FRAC = 0.50       # keep loops with at least 50% of the max length
+
+    max_len = scored[0][1] if scored else 0.0
+    filtered = [(lp, ln) for (lp, ln, npts) in scored if npts >= MIN_PTS and ln >= MIN_FRAC * max_len]
+
+    # print(f"Filtered(post sort): {filtered}")
+
+    # If filtering leaves fewer than 2, fall back to the top-2 by length
+    if len(filtered) < 2:
+        top2 = [scored[i][0] for i in range(min(2, len(scored)))]
+        return (top2[0], top2[1]) if len(top2) == 2 else (None, None)
+
+    # From filtered candidates, choose the two farthest apart along axis
+    candidates = [lp for lp, _ in filtered[: min(10, len(filtered))]]
+    projs = [float(np.dot(lp.points.mean(axis=0), axis)) for lp in candidates]
+
+    best_pair = None
+    best_dist = -1.0
+    for i in range(len(candidates)):
+        for j in range(i + 1, len(candidates)):
+            d = abs(projs[i] - projs[j])
+            if d > best_dist:
+                best_dist = d
+                best_pair = (candidates[i], candidates[j])
+
+    return best_pair if best_pair else (None, None)
+
+def _split_components(ds) -> list[pv.PolyData]:
+    """
+    Split a dataset into connected components (PolyData), returning a list of PolyData objects.
+    This is to create "candidate loops" from edge extraction, in case of multiple loops being 
+    found or fragmentation.
+    """
+    if ds is None or ds.n_points == 0:
+        return []
+    mb = ds.split_bodies()
+    blocks = []
+    if isinstance(mb, pv.MultiBlock):
+        for i in range(len(mb)):
+            b = mb[i]
+            if b is None or b.n_points == 0:
+                continue
+            blocks.append(b if isinstance(b, pv.PolyData) else b.extract_surface())
+    else:
+        if mb is not None and mb.n_points > 0:
+            blocks.append(mb if isinstance(mb, pv.PolyData) else mb.extract_surface())
+    return blocks
+
+def _slice_loops_near_ends(surf_poly: pv.PolyData, axis: np.ndarray, frac: float = 0.01) -> tuple[pv.PolyData, pv.PolyData] | tuple[None, None]:
+    """
+    Fallback for watertight meshes (no boundary edges).
+    Slice near the two extremes along the principal axis and extract intersection polylines.
+    Literally the last thing to try if all else fails, because it is less robust and not
+    all coils will be capped nicely. 
+    """
+    pts = surf_poly.points
+    t = pts @ axis
+    tmin, tmax = float(t.min()), float(t.max())
+    span = tmax - tmin
+    if span <= 0:
+        return None, None
+
+    # pick planes slightly inboard from extremes
+    d = max(frac * span, 1e-6)
+    o1 = axis * (tmin + d)
+    o2 = axis * (tmax - d)
+
+    # Slice returns polylines where mesh intersects the plane
+    s1 = surf_poly.slice(normal=axis, origin=o1).clean(tolerance=1e-6)
+    s2 = surf_poly.slice(normal=axis, origin=o2).clean(tolerance=1e-6)
+
+    # Sometimes slice yields multiple polylines; pick the largest by perimeter
+    c1 = _split_components(s1)
+    c2 = _split_components(s2)
+    if not c1 or not c2:
+        return None, None
+
+    c1.sort(key=_component_perimeter, reverse=True)
+    c2.sort(key=_component_perimeter, reverse=True)
+    return c1[0], c2[0]
+
+def extract_coil_end_loops(
+    surf_poly: pv.PolyData,
+    angle_threshold: float = 75.0,
+    clean_tolerance: float = 1e-6,
+    prefer_boundary_only: bool = True,
+) -> tuple[pv.PolyData, pv.PolyData]:
+    """
+      1) Try boundary edges only
+      2) Try boundary + feature edges
+      3) If no boundary edges (watertight), fallback to slicing near ends
+    """
+    if surf_poly is None or surf_poly.n_points == 0:
+        raise ValueError("surf_poly is empty.")
+
+    axis = _pca_axis(surf_poly.points)
+
+    # --- Pass 1: Boundary edges only ---
+    if prefer_boundary_only:
+        edges = surf_poly.extract_feature_edges(
+            boundary_edges=True,
+            feature_edges=False,
+            manifold_edges=False,
+            feature_angle=angle_threshold
+        ).clean(tolerance=clean_tolerance) 
+
+        loops = _split_components(edges)
+
+        if len(loops) == 2:
+            return loops[0], loops[1]
+
+        if len(loops) > 2:
+            loopA, loopB = _pick_best_two_loops(loops, axis)
+            if loopA is not None and loopB is not None:
+                return loopA, loopB
+
+        # If prefer_boundary_only is True but we didn't find two loops, continue to Pass 2.
+        # ... We will almost always use pass 2 and not pass 1
+
+    # --- Pass 2: Boundary + feature edges (to catch fragmented ends) ---
+    edges = surf_poly.extract_feature_edges(
         boundary_edges=True,
         feature_edges=True,
         manifold_edges=False,
-        feature_angle=feature_angle
+        feature_angle=angle_threshold
+    ).clean(tolerance=clean_tolerance)
+
+    loops = _split_components(edges)
+
+    # This should show available loops. The program should be using the best two below.
+    # for i, lp in enumerate(loops):
+    #     print(f"[DEBUG] loop {i}: n_points={lp.n_points}, n_cells={lp.n_cells}")
+
+    if len(loops) == 2:
+        return loops[0], loops[1]
+
+    if len(loops) > 2:
+        print("TOO MANY LOOPS")
+        loopA, loopB = _pick_best_two_loops(loops, axis)
+        if loopA is not None and loopB is not None:
+            return loopA, loopB
+
+    # --- Pass 3 fallback: watertight mesh or bad boundaries -> slice near ends ---
+    loopA, loopB = _slice_loops_near_ends(surf_poly, axis)
+    if loopA is not None and loopB is not None:
+        return loopA, loopB
+
+    raise ValueError(
+        "Could not identify two end loops. "
+        "Try: (1) repairing STL to ensure open ends, "
+        "(2) increasing mesh resolution, "
+        "(3) adjusting angle_threshold, "
+        "(4) verify the mesh is not watertight if you expect open ends."
     )
-    split_edges = edges_poly.split_bodies()
-    if isinstance(split_edges, pv.MultiBlock):
-        loops = [split_edges[i] for i in range(len(split_edges))]
-    else:
-        loops = [split_edges]
-    n_loops = len(loops)
-    if n_loops != 2:
-        # Log the error without trying to visualize (which can cause crashes)
-        logging.error(
-            f"Expected exactly 2 end loops, but found {n_loops}. "
-            f"Feature angle: {feature_angle}°. "
-            "Try adjusting the feature angle (typical range: 30-85 degrees). "
-            "For this geometry, try values around 50-75 degrees."
-        )
-        raise ValueError(
-            f"Expected exactly 2 end loops, but found {n_loops}. "
-            f"Please adjust the feature angle (current: {feature_angle}°). "
-            "Typical working range: 30-85 degrees."
-        )
+
+def split_connected_loops(poly: pv.PolyData) -> list[pv.PolyData]:
+    """
+    Split a (polyline) PolyData into connected components (loops/curves),
+    tolerating PyVista versions where RegionId may be in point_data instead of cell_data.
+    Returns a list of PolyData, one per connected component.
+    """
+    if poly is None or poly.n_cells == 0:
+        return []
+
+    # First try standard cell-based connectivity
+    labeled = poly.connectivity(point_data=False)
+    rid_cell = labeled.cell_data.get('RegionId', None)
+
+    loops = []
+    if rid_cell is not None:
+        # Split by cell RegionId
+        rids = np.unique(rid_cell)
+        for rid in rids:
+            # Select cells with this region id
+            mask = (rid_cell == rid)
+            cell_ids = np.where(mask)[0]
+            if cell_ids.size == 0:
+                continue
+            sub = labeled.extract_cells(cell_ids)
+            if sub is not None and sub.n_cells > 0 and sub.n_points >= 2:
+                loops.append(sub)
+
+        return loops
+    
+    # Fallback
+    labeled = poly.connectivity(point_data=True)
+    rid_point = labeled.point_data.get('RegionId', None)
+    if rid_point is None:
+        return [poly]
+
+    rids = np.unique(rid_point)
+    for rid in rids:
+        pmask = (rid_point == rid)
+        sub = labeled.extract_points(pmask, adjacent_cells=True)
+        if sub is not None and sub.n_cells > 0 and sub.n_points >= 2:
+            loops.append(sub)
+
     return loops
+
+def map_poly_points_to_surface_indices(
+    loop_poly: pv.PolyData,
+    surf_poly: pv.PolyData,
+    tol: float | None = None
+) -> set[int]:
+    """
+    Map loop_poly points to nearest vertex indices in surf_poly, with tolerance.
+    This replaces brittle exact coordinate matching.
+
+    tol: maximum allowed distance from a loop point to its mapped surface vertex.
+         If None, uses a scale-aware default based on surf_poly bbox diagonal.
+    """
+    if loop_poly is None or loop_poly.n_points == 0:
+        return set()
+    if surf_poly is None or surf_poly.n_points == 0:
+        return set()
+
+    surf_pts = np.asarray(surf_poly.points)
+    loop_pts = np.asarray(loop_poly.points)
+
+    if tol is None:
+        xmin, xmax, ymin, ymax, zmin, zmax = surf_poly.bounds
+        diag = float(np.linalg.norm([xmax - xmin, ymax - ymin, zmax - zmin]))
+        tol = max(1e-6, 1e-4 * diag) 
+
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(surf_pts)
+        dists, idxs = tree.query(loop_pts, k=1)
+        # print(f"[DEBUG] map distances: min={dists.min():.3e} med={np.median(dists):.3e} max={dists.max():.3e} tol={tol:.3e}") # If tol of mid and max are >> tol, then mapping is failing.
+        return {int(i) for d, i in zip(dists, idxs) if d <= tol}
+    except Exception:
+        out = set()
+        for p in loop_pts:
+            i = int(surf_poly.find_closest_point(p))
+            if float(np.linalg.norm(surf_pts[i] - p)) <= tol:
+                out.add(i)
+        return out
+
+def compute_marching_rings(surf_poly: pv.PolyData,
+                           loopA: pv.PolyData,
+                           loopB: pv.PolyData,
+                           status_label= QLabel) -> list[set]:
+    """
+    Return marching_record (list of vertex-index sets) without collapsing
+    them into center points.
+    """
+    status_label.setText("Computing marching rings...")
+    QApplication.processEvents()
+    pv_faces = surf_poly.faces.reshape((-1, 4))[:, 1:]
+    vertices = surf_poly.points
+
+    status_label.setText("Mapping end loops to surface vertices...")
+    QApplication.processEvents()
+    loopA_plane_centroid, loopA_plane_normal = compute_best_fit_plane(loopA.points)
+    loopB_plane_centroid, loopB_plane_normal = compute_best_fit_plane(loopB.points)
+
+    status_label.setText("Selecting end vertices near planes...")
+    QApplication.processEvents()
+    endA_vertex_indices = select_vertices_near_plane(
+        surf_poly, loopA_plane_centroid, loopA_plane_normal, TOL
+    )
+    endB_vertex_indices = select_vertices_near_plane(
+        surf_poly, loopB_plane_centroid, loopB_plane_normal, TOL
+    )
+    
+    status_label.setText("Identifying active vertices...")
+    QApplication.processEvents()
+    all_vertex_indices = set(range(len(vertices)))
+    inactive_vertex_indices = set(endA_vertex_indices).union(set(endB_vertex_indices))
+    active_vertex_indices = all_vertex_indices - inactive_vertex_indices
+
+    pv_faces_set = set()
+    for f_idx, face in enumerate(pv_faces):
+        if any(v in active_vertex_indices for v in face):
+            pv_faces_set.add(f_idx)
+
+    status_label.setText("Mapping loop points to surface vertices...")
+    QApplication.processEvents()
+    V_mov = map_poly_points_to_surface_indices(loopA, surf_poly, tol=None)
+    V_ref = map_poly_points_to_surface_indices(loopB, surf_poly, tol=None)
+
+    # This should tell you whether mapping is working. If the numbers are extremely small (i.e. loops aren't being found), that may be why something fails later.
+    # print(
+    #     f"[DEBUG] marching rings mapping:"
+    #     f" V_mov={len(V_mov)}"
+    #     f" V_ref={len(V_ref)}"
+    # )
+
+    if len(V_mov) == 0 or len(V_ref) == 0:
+        raise ValueError(
+            f"Could not map loop points to surface vertices "
+            f"(V_mov={len(V_mov)}, V_ref={len(V_ref)}). "
+            "This is typically caused by edge cleaning/feature extraction altering point coordinates. "
+            "Increase mapping tolerance or reduce clean_tolerance / prefer boundary-only loops."
+        )
+
+    def _external_edges_and_vertices(faces_subset: set):
+        e2f = defaultdict(list)
+        for f_idx in faces_subset:
+            tri = pv_faces[f_idx]
+            for edge in [tuple(sorted((tri[0], tri[1]))),
+                         tuple(sorted((tri[1], tri[2]))),
+                         tuple(sorted((tri[2], tri[0])))]:
+                e2f[edge].append(f_idx)
+        E_ext = [e for e, flist in e2f.items() if len(flist) == 1]
+        V_ext = {v for e in E_ext for v in e}
+        return E_ext, V_ext
+
+    visited = set()
+    marching_record = []
+    current_moving = set(V_mov)
+    total_len = len(pv_faces_set)
+
+    while True:
+        visited |= current_moving
+        new_active_faces = {
+            f_idx for f_idx in pv_faces_set
+            if not any(v in visited for v in pv_faces[f_idx])
+        }
+        if not new_active_faces:
+            break
+
+        _, V_ext_new = _external_edges_and_vertices(new_active_faces)
+
+        new_moving = V_ext_new - V_ref
+        if not new_moving:
+            break
+
+        marching_record.append(new_moving.copy())
+        current_moving = new_moving
+
+        if len(marching_record) % 10 == 0:
+            status_label.setText(
+                f"Computing marching rings... "
+                f"processed {len(marching_record)} rings, "
+                f"{len(new_active_faces)}/{total_len} faces remaining."
+            )
+            QApplication.processEvents()
+
+    return marching_record
+
+def vertex_set_to_points(surf_poly: pv.PolyData, vset: set) -> np.ndarray:
+    """
+    Map a set of vertex indices to xyz points.
+    This function is used to help display the data in meshing.
+    """
+    verts = surf_poly.points
+    return np.array([verts[v] for v in vset], dtype=float)
+
+
+def ring_to_polyline(ring_points: np.ndarray,
+                     n_points: int = 200,
+                     smoothing: float = 0.0) -> pv.PolyData:
+    """
+    Turn a noisy ring of points into an ordered, smooth closed polyline,
+    reusing existing helpers (order_loop_points_pca, refine_loop, create_polyline).
+    """
+    ordered = order_loop_points_pca(ring_points)
+    refined = refine_loop(pv.PolyData(ordered), n_points=n_points,
+                          smoothing=smoothing, spline_degree=3)
+    return create_polyline(refined, closed=True)
 
 def compute_centerline_3d_mce(surf_poly: pv.PolyData, loopA: pv.PolyData, loopB: pv.PolyData) -> Tuple[Optional[np.ndarray], List[set]]:
     """
@@ -316,10 +665,10 @@ def compute_centerline_3d_mce(surf_poly: pv.PolyData, loopA: pv.PolyData, loopB:
     loopB_plane_centroid, loopB_plane_normal = compute_best_fit_plane(loopB.points)
 
     endA_vertex_indices = select_vertices_near_plane(surf_poly, loopA_plane_centroid, loopA_plane_normal, TOL)
-    logging.debug(f"Found {len(endA_vertex_indices)} on end A out of {len(vertices)} vertices in the mesh based on plane tolerance.")
+    logging.info(f"Found {len(endA_vertex_indices)} on end A out of {len(vertices)} vertices in the mesh based on plane tolerance.")
 
     endB_vertex_indices = select_vertices_near_plane(surf_poly, loopB_plane_centroid, loopB_plane_normal, TOL)
-    logging.debug(f"Found {len(endB_vertex_indices)} on end B out of {len(vertices)} vertices in the mesh based on plane tolerance.")
+    logging.info(f"Found {len(endB_vertex_indices)} on end B out of {len(vertices)} vertices in the mesh based on plane tolerance.")
 
     all_vertex_indices = set(range(len(vertices)))
 
@@ -329,7 +678,7 @@ def compute_centerline_3d_mce(surf_poly: pv.PolyData, loopA: pv.PolyData, loopB:
     # The active vertex indices are those not in the inactive set.
     active_vertex_indices = all_vertex_indices - inactive_vertex_indices
 
-    logging.debug(f"Active vertex count: {len(active_vertex_indices)} out of {len(vertices)} total vertices.")
+    logging.info(f"Active vertex count: {len(active_vertex_indices)} out of {len(vertices)} total vertices.")
 
     # Now, build the active face set.
     # Each face is given by an array of vertex indices (from pv_faces).
@@ -339,7 +688,7 @@ def compute_centerline_3d_mce(surf_poly: pv.PolyData, loopA: pv.PolyData, loopB:
         if any(v in active_vertex_indices for v in face):
             active_face_indices.add(f_idx)
 
-    logging.debug(f"Active face count: {len(active_face_indices)} out of {len(pv_faces)} total faces.")
+    logging.info(f"Active face count: {len(active_face_indices)} out of {len(pv_faces)} total faces.")
 
     edge_to_faces = defaultdict(list)
     for f_idx, tri in enumerate(faces):
@@ -430,6 +779,42 @@ def trim_end(raw_points: np.ndarray, n_trim: int) -> np.ndarray:
     if not np.allclose(trimmed[-1], raw_points[-1], atol=1e-6):
         trimmed = np.vstack([trimmed, raw_points[-1]])
     return trimmed
+
+def smooth_centerline(centerline_points: np.ndarray, s: float = 1.0, k: int = 3, n_interp: int = 200) -> np.ndarray:
+    """
+    Smooth the centerline using spline interpolation with endpoint weighting.
+    
+    Parameters:
+        centerline_points: Array of centerline points.
+        s: Smoothing factor.
+        k: Spline degree.
+        n_interp: Number of interpolated points.
+    
+    Returns:
+        Smoothed centerline points.
+    """
+    if centerline_points.shape[0] < 3:
+        return centerline_points.copy()
+    x, y, z = centerline_points.T
+    weights = np.ones(centerline_points.shape[0])
+    weights[0] = ENDPOINT_WEIGHT
+    weights[-1] = ENDPOINT_WEIGHT
+    diffs = np.diff(centerline_points, axis=0)
+    seg_lengths = np.linalg.norm(diffs, axis=1)
+    t = np.concatenate(([0], np.cumsum(seg_lengths)))
+    total_length = t[-1]
+    if total_length < EPS:
+        return centerline_points.copy()
+    t /= total_length
+    try:
+        tck, _ = splprep([x, y, z], u=t, w=weights, s=s, k=k)
+        u_new = np.linspace(0, 1, n_interp)
+        x_new, y_new, z_new = splev(u_new, tck)
+        smoothed_points = np.vstack((x_new, y_new, z_new)).T
+        return smoothed_points
+    except Exception as e:
+        logging.error(f"Centerline smoothing failed: {e}")
+        return centerline_points.copy()
 
 # -----------------------------------------------------------------------------
 # End Loop and Intermediate Contour Functions
@@ -524,8 +909,7 @@ def refine_loop(loop_poly: pv.PolyData, n_points: int = 200, smoothing: float = 
     try:
         tck, _ = splprep([pts[:, 0], pts[:, 1], pts[:, 2]], u=u, s=smoothing, k=spline_degree, per=True)
     except Exception as e:
-        # Reduce noise - this is often expected for complex loops
-        logging.debug(f"Refining loop failed during splprep: {e}")
+        logging.error(f"Refining loop failed during splprep: {e}")
         return pts
     dense_n = 1000
     u_dense = np.linspace(0, 1, dense_n)
@@ -620,35 +1004,114 @@ def minimal_rotation_matrix(u: np.ndarray, v: np.ndarray) -> np.ndarray:
     angle = np.arccos(np.clip(dot_val, -1, 1))
     return rodrigues(axis, angle)
 
-def slice_surface_at_point(surf_poly: pv.PolyData, point: np.ndarray, normal: np.ndarray) -> Optional[pv.PolyData]:
+def slice_surface_at_point(
+    surf_poly: pv.PolyData,
+    point: np.ndarray,
+    normal: np.ndarray,
+    prev_center: Optional[np.ndarray] = None,
+    prev_weight: float = 1.0,
+    min_points: int = 10,
+    far_ratio_reject: float = 5.0 
+) -> Optional[pv.PolyData]:
     """
-    Slice the surface mesh with a plane defined by a point and a normal.
-    If multiple loops result, return the one whose centroid is closest to the point.
-    
-    Parameters:
-        surf_poly: The surface mesh.
-        point: A point on the slicing plane.
-        normal: The normal vector of the slicing plane.
-    
-    Returns:
-        The sliced loop as a PolyData, or None if the intersection is insufficient.
+    Slice surf_poly at (point, normal). If multiple loops exist, choose the loop
+    that stays closest to the requested point AND to prev_center (continuity).
+
+    Uses centroid = mean(loop.points) (NOT loop.center).
     """
     sliced = surf_poly.slice(origin=point, normal=normal)
-    if sliced.n_points < 3:
+    if sliced is None or sliced.n_points < min_points:
         return None
+
     loops = sliced.split_bodies()
-    if isinstance(loops, pv.MultiBlock):
-        min_dist = float('inf')
-        closest_loop = None
-        for i in range(len(loops)):
-            loop = loops[i]
-            dist = np.linalg.norm(loop.center - point)
-            if dist < min_dist:
-                min_dist = dist
-                closest_loop = loop
-        return closest_loop
-    else:
-        return loops
+
+
+    if not isinstance(loops, pv.MultiBlock):
+        return loops if loops.n_points >= min_points else None
+
+    use_prev = prev_center is not None
+    prev_center = np.asarray(prev_center, dtype=float) if use_prev else None
+    point = np.asarray(point, dtype=float)
+
+    candidates = []
+    for i in range(len(loops)):
+        loop = loops[i]
+        if loop is None or loop.n_points < min_points:
+            continue
+
+        centroid = loop.points.mean(axis=0)
+        d_point = float(np.linalg.norm(centroid - point))
+        d_prev  = float(np.linalg.norm(centroid - prev_center)) if use_prev else 0.0
+
+        score = d_point + (prev_weight * d_prev)
+        candidates.append((score, d_point, d_prev, loop))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0])
+    best_score, best_d_point, best_d_prev, best_loop = candidates[0]
+
+    if len(candidates) > 1:
+        second_score, second_d_point, second_d_prev, _ = candidates[1]
+        if second_score > far_ratio_reject * best_score:
+            return best_loop
+
+    return best_loop
+
+def densify_centerline_with_slices(
+    surf_poly: pv.PolyData,
+    raw_centerline: np.ndarray,
+    gap_factor: float = 2.5,
+    slice_min_points: int = 10,
+) -> np.ndarray:
+    """
+    Fill large gaps between consecutive raw centerline points by:
+      1) inserting linear points along the chord (B - A)
+      2) re-centering each inserted point using a mesh slice whose normal is the chord direction
+
+    IMPORTANT: This does NOT use any "last marching record direction". Straightaways are defined by the chord.
+
+    THIS IS STUPID IMPORTANT FOR .STLS! A lot of low poly stl files have long straightaways with no change in surface, so this helps A LOT
+    """
+    pts = np.asarray(raw_centerline, dtype=float)
+    if pts.shape[0] < 2:
+        return pts
+
+    seg = pts[1:] - pts[:-1]
+    seglen = np.linalg.norm(seg, axis=1)
+    med = float(np.median(seglen[seglen > 1e-12])) if np.any(seglen > 1e-12) else 0.0
+    if med <= 0.0:
+        return pts
+
+    target = med
+    out = [pts[0]]
+
+    for i in range(len(pts) - 1):
+        A = pts[i]
+        B = pts[i + 1]
+        dvec = B - A
+        d = float(np.linalg.norm(dvec))
+        if d < 1e-12:
+            continue
+
+        n = dvec / d
+
+        n_insert = int(np.ceil(d / target)) - 1 if d > gap_factor * target else 0
+
+        for k in range(1, n_insert + 1):
+            a = k / (n_insert + 1)
+            p = (1 - a) * A + a * B
+
+            sliced = slice_surface_at_point(surf_poly, p, n)
+            if sliced is not None and sliced.n_points >= slice_min_points:
+                p = sliced.points.mean(axis=0)
+
+            out.append(p)
+
+        out.append(B)
+
+    return np.asarray(out, dtype=float)
 
 def compute_local_tangent(centerline: np.ndarray, i: int) -> np.ndarray:
     """
@@ -837,7 +1300,7 @@ def smooth_surface_curve(curve: np.ndarray, s: float = 0.1, k: int = 3, n_interp
         smoothed_curve[-1] = curve[-1]
         return smoothed_curve
     except Exception as e:
-        logging.debug(f"Surface curve smoothing failed: {e}")
+        logging.error(f"Surface curve smoothing failed: {e}")
         return curve.copy()
 
 
@@ -859,9 +1322,9 @@ def plot_marching_record(surface_mesh: pv.PolyData, raw_centerline: np.ndarray, 
         plotter = pv.Plotter()
 
     plotter.add_mesh(surface_mesh, color='lightgray', opacity=0.5, label='Surface Mesh')
-    plotter.add_mesh(pv.PolyData(raw_centerline), color='blue', line_width=3, label='Raw Centerline')
-    plotter.add_mesh(loopA, color="red", line_width=2, label="Loop A")
-    plotter.add_mesh(loopB, color="green", line_width=2, label="Loop B")
+    plotter.add_mesh(pv.PolyData(raw_centerline), color='blue', line_width=3, label='Centerline')
+    plotter.add_mesh(loopA, color="red", line_width=2, label="Start Loop")
+    plotter.add_mesh(loopB, color="green", line_width=2, label="End Loop")
 
     for idx, v_set in enumerate(marching_record):
         if idx % step == 0:
@@ -873,4 +1336,3 @@ def plot_marching_record(surface_mesh: pv.PolyData, raw_centerline: np.ndarray, 
     plotter.reset_camera()
     plotter.render()
     plotter.show()
-    
