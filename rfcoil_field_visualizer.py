@@ -56,6 +56,32 @@ def generate_base_coil(params, num_points=200):
     coil_points = coil_points_local.dot(R_y.T)
     return coil_points
 
+def generate_base_coil_tilted(params, num_points=200):
+    """
+    Generate the base coil centerline using the given parameters.
+    The coil centerline is defined by a modified sigmoid and trigonometric functions.
+    The r₀ value in params is used to adjust the radius in the y and z equations.
+    Beta has been removed from the equations.
+    """
+    t = np.linspace(0, 1, num_points)
+    # x coordinate based solely on the sigmoid term
+    x = np.sqrt(2) * (params['length'] / (3)**0.5) * (
+            (1 / (1 + np.exp(-params['alpha'] * (t - 0.5))) -
+             1 / (1 + np.exp(params['alpha'] / 2))) /
+            (1 / (1 + np.exp(-params['alpha'] / 2)) -
+             1 / (1 + np.exp(params['alpha'] / 2)))
+        )
+    y = (params['radius_y'] + params['r0']) * np.cos(2 * np.pi * params['turns'] * t)
+    z = (params['radius_y'] + params['r0']) * np.sqrt(1.5) * np.sin(2 * np.pi * params['turns'] * t) + \
+        (params['length'] / (3)**0.5) * (
+            (1 / (1 + np.exp(-params['alpha'] * (t - 0.5))) -
+             1 / (1 + np.exp(params['alpha'] / 2))) /
+            (1 / (1 + np.exp(-params['alpha'] / 2)) -
+             1 / (1 + np.exp(params['alpha'] / 2)))
+        )
+    coil_points = np.vstack((x, y, z)).T
+    return coil_points
+
 def center_coil(coil_points):
     """
     Center the coil by subtracting its geometric centroid.
@@ -1465,7 +1491,7 @@ class MeshProcessorTab(QWidget):
         # Left side panel
         left_panel = QVBoxLayout()
 
-        # Shared header (fixed across all tabs)
+        # Shared header/status
         self.loaded_file = QLabel("No file loaded")
         self.loaded_file.setStyleSheet("color: green;")
         self.status_label = QLabel("Status: Ready")
@@ -1476,7 +1502,7 @@ class MeshProcessorTab(QWidget):
         left_panel.addWidget(self.status_label)
         left_panel.addSpacing(8)
 
-        # Tabs (store as member so it can be accessed later if needed)
+        # Tabs
         self.control_tabs = QTabWidget()
         self.control_tabs.setTabPosition(QTabWidget.West)
 
@@ -1831,12 +1857,9 @@ class MeshProcessorTab(QWidget):
         if not self.input_file:
             return
         
-        if self.accept_stp:
-            self.source_file = self.input_file 
-            self.can_regenerate = True
-        else:
-            self.source_file = None
-            self.can_regenerate = False
+        # Unhide reload button and save current file for reprocessing if needed
+        self.can_regenerate = True
+        self.source_file = self.input_file
         
         # Ensure that if a new file is loaded, the centerline and surface curves buttons are disabled until re-processed
         if previous_file != self.input_file:
@@ -1878,9 +1901,11 @@ class MeshProcessorTab(QWidget):
                         elif action == "override":
                             self.generate_mesh(self.msh_file)
                             break
-                else: # it ain't there, so just generate normally
+                else: 
+                    # it ain't there, so just generate normally
                     self.generate_mesh(self.msh_file)
-            else: # MSH file selected directly
+            else: 
+                # MSH file selected directly
                 self.load_existing_msh(self.input_file)
 
             self.regen_container.setVisible(self.can_regenerate)
@@ -2535,6 +2560,14 @@ class OptimizationTab(QWidget):
         title = QLabel("<b>Base Coil Parameters</b>")
         title.setStyleSheet("font-size: 13px; padding-bottom: 5px;")
         layout.addWidget(title)
+
+        self.rotated_coil = QRadioButton("Use Base Coil")
+        self.rotated_coil.setChecked(True)
+        layout.addWidget(self.rotated_coil)
+
+        self.tilted_coil = QRadioButton("Use Tilted Base Coil")
+        self.tilted_coil.setChecked(False)
+        layout.addWidget(self.tilted_coil)
         
         # Create grid layout for parameters
         grid = QGridLayout()
@@ -2822,7 +2855,11 @@ class OptimizationTab(QWidget):
             combined_params = params_dict['coil_params']
             volume = params_dict['volume']
             
-            coil_pts = generate_base_coil(combined_params)
+            if self.tilted_coil.isChecked():
+                coil_pts = generate_base_coil_tilted(combined_params)
+            else:
+                coil_pts = generate_base_coil(combined_params)
+
             coil_pts, _ = center_coil(coil_pts)
             
             self.status_label.setText("Status: Generating surface curves...")

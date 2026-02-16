@@ -192,7 +192,7 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
         try:
             surf_poly = pv.read(input_filename)
             logging.info(f"Loaded surface mesh from STL file: {input_filename}")
-            status_label.setText(f"Converting STL to mesh: {os.path.basename(input_filename)}")
+            status_label.setText(f"Loading stl file: {os.path.basename(input_filename)}")
             QApplication.processEvents()
             vertices = surf_poly.points
             faces    = surf_poly.faces.reshape((-1, 4))[:, 1:]
@@ -201,6 +201,8 @@ def load_surface_mesh(input_filename: str, mesh_filename: str, element_size: flo
         except Exception as e:
             logging.error(f"Failed to load STL file '{input_filename}': {e}")
     elif ext in [".stp", ".step"]:
+        status_label.setText(f"Meshing STEP file: {os.path.basename(input_filename)}")
+        QApplication.processEvents()
         mesh_step_file(input_filename, mesh_filename, element_size, size_factor, status_label)
         grid_or_poly = load_msh_as_pv_mesh(mesh_filename)
         if isinstance(grid_or_poly, pv.UnstructuredGrid):
